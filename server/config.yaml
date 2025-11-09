@@ -1,0 +1,41 @@
+# HumbleVoice Server Configuration
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  debug: false
+
+stt:
+  engine: whisper_cpp
+  model: tiny.en
+  model_path: ./models/ggml-tiny.en.bin
+  executable_path: ./whisper.cpp/main
+
+tts:
+  engine: piper
+  model: en_US-lessac-medium
+  model_path: ./models/en_US-lessac-medium.onnx
+  executable_path: ./piper/piper
+
+llm:
+  engine: ollama
+  model: phi3:mini
+  host: http://localhost:11434
+  temperature: 0.7
+  max_tokens: 500
+
+home_assistant:
+  enabled: true
+  url: http://homeassistant.local:8123
+  token: YOUR_HA_TOKEN
+  auto_discover: true
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  format: int16
+  buffer_size: 1024
+
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

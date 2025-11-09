@@ -1,0 +1,59 @@
+"""
+Large Language Model module for HumbleVoice
+Uses Ollama for local LLM inference
+"""
+import requests
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL_NAME = "phi3:mini"
+
+def generate_response(prompt):
+    """
+    Generate response using local LLM via Ollama
+    
+    Args:
+        prompt (str): Input text to generate response for
+    
+    Returns:
+        str: Generated response text
+    """
+    if not prompt or prompt.strip() == "":
+        logger.warning("Empty prompt provided to LLM")
+        return "I didn't understand that."
+    
+    data = {
+        "model": MODEL_NAME,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40
+        }
+    }
+    
+    try:
+        response = requests.post(OLLAMA_URL, json=data, timeout=60)
+        
+        if response.status_code == 200:
+            result = response.json()
+            response_text = result.get('response', 'No response generated')
+            logger.info(f"LLM generated response: {response_text[:100]}...")
+            return response_text
+        else:
+            logger.error(f"LLM API error: {response.status_code} - {response.text}")
+            return "Sorry, I'm having trouble thinking right now."
+            
+    except requests.exceptions.ConnectionError:
+        logger.error("Cannot connect to Ollama server")
+        return "LLM Error: Cannot connect to local model server"
+    except requests.exceptions.Timeout:
+        logger.error("LLM request timed out")
+        return "LLM Error: Request timed out"
+    except Exception as e:
+        logger.error(f"LLM error: {e}")
+        return f"LLM Error: {str(e)}"

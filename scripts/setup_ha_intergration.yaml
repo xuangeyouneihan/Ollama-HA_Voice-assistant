@@ -1,0 +1,50 @@
+# Home Assistant Integration for HumbleVoice
+# Add this to your configuration.yaml file
+
+# REST command to send queries to HumbleVoice server
+rest_command:
+  humblevoice_query:
+    url: "http://192.168.1.100:8000/audio"  # Replace with your server IP
+    method: POST
+    payload: "{{ message }}"
+    content_type: "application/json"
+    timeout: 30
+
+# Intent script for voice commands
+intent_script:
+  HumbleVoiceQuery:
+    speech:
+      type: plain
+      text: "Processing your request"
+    action:
+      service: rest_command.humblevoice_query
+      data:
+        message: "{{ text }}"
+
+# Example automation to trigger HumbleVoice
+automation:
+  - alias: "HumbleVoice Test Automation"
+    trigger:
+      - platform: state
+        entity_id: switch.humblevoice_test
+    action:
+      - service: rest_command.humblevoice_query
+        data:
+          message: "Hello from Home Assistant"
+
+# Example input text for testing
+input_text:
+  humblevoice_command:
+    name: "HumbleVoice Command"
+    initial: ""
+    min: 1
+    max: 255
+
+# Example script to send command
+script:
+  send_humblevoice_command:
+    alias: "Send HumbleVoice Command"
+    sequence:
+      - service: rest_command.humblevoice_query
+        data:
+          message: "{{ states('input_text.humblevoice_command') }}"
