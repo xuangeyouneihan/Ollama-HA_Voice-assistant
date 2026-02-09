@@ -8,8 +8,8 @@ server:
 stt:
   engine: wyoming
   host: 127.0.0.1
-  port: 10300
-  language: en
+  port: 10400
+  language: zh_CN
   sample_rate: 16000
   sample_width: 2 # bytes, 16-bit
   channels: 1
@@ -17,8 +17,8 @@ stt:
 tts:
   engine: wyoming
   host: 127.0.0.1
-  port: 10200
-  voice: en_US-lessac-medium
+  port: 10400
+  voice: vits-melo-tts-zh_en
   sample_rate: 16000
   sample_width: 2
   channels: 1
@@ -34,7 +34,6 @@ llm:
 home_assistant:
   enabled: true
   url: http://homeassistant.local:8123
-  token: YOUR_HA_TOKEN
   auto_discover: true
 
 audio:
