@@ -5,11 +5,16 @@ Uses Ollama for local LLM inference
 import requests
 import json
 import logging
+from config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "phi3:mini"
+cfg = get_config()
+llm_cfg = cfg.get("llm", {}) if cfg else {}
+OLLAMA_HOST = llm_cfg.get("host", "http://localhost:11434").rstrip("/")
+OLLAMA_URL = f"{OLLAMA_HOST}/api/generate"
+MODEL_NAME = llm_cfg.get("model", "phi3:mini")
+TIMEOUT = llm_cfg.get("timeout", 60)
 
 def generate_response(prompt):
     """
@@ -37,7 +42,7 @@ def generate_response(prompt):
     }
     
     try:
-        response = requests.post(OLLAMA_URL, json=data, timeout=60)
+        response = requests.post(OLLAMA_URL, json=data, timeout=TIMEOUT)
         
         if response.status_code == 200:
             result = response.json()

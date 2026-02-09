@@ -5,12 +5,14 @@ Handles HA commands and entity control
 import requests
 import json
 import logging
+from config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
-# Configuration - these should be loaded from config file
-HA_URL = "http://homeassistant.local:8123"
-HA_TOKEN = "YOUR_HA_TOKEN"  # Should be loaded from environment/config
+cfg = get_config()
+ha_cfg = cfg.get("home_assistant", {}) if cfg else {}
+HA_URL = ha_cfg.get("url", "http://homeassistant.local:8123")
+HA_TOKEN = ha_cfg.get("token", "YOUR_HA_TOKEN")
 
 headers = {
     "Authorization": f"Bearer {HA_TOKEN}",

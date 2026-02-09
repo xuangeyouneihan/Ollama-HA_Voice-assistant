@@ -6,23 +6,30 @@ server:
   debug: false
 
 stt:
-  engine: whisper_cpp
-  model: tiny.en
-  model_path: ./models/ggml-tiny.en.bin
-  executable_path: ./whisper.cpp/main
+  engine: wyoming
+  host: 127.0.0.1
+  port: 10300
+  language: en
+  sample_rate: 16000
+  sample_width: 2  # bytes, 16-bit
+  channels: 1
 
 tts:
-  engine: piper
-  model: en_US-lessac-medium
-  model_path: ./models/en_US-lessac-medium.onnx
-  executable_path: ./piper/piper
+  engine: wyoming
+  host: 127.0.0.1
+  port: 10200
+  voice: en_US-lessac-medium
+  sample_rate: 16000
+  sample_width: 2
+  channels: 1
 
 llm:
   engine: ollama
-  model: phi3:mini
+  model: qwen3:14b
   host: http://localhost:11434
-  temperature: 0.7
+  temperature: 0.6
   max_tokens: 500
+  timeout: 120
 
 home_assistant:
   enabled: true
