@@ -11,7 +11,7 @@ stt:
   port: 10300
   language: en
   sample_rate: 16000
-  sample_width: 2  # bytes, 16-bit
+  sample_width: 2 # bytes, 16-bit
   channels: 1
 
 tts:
