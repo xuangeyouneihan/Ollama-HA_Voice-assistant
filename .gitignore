@@ -1,1 +1,5 @@
 server/config.private.yaml
+server/.venv/
+.venv/
+.venv
+**/__pycache__/

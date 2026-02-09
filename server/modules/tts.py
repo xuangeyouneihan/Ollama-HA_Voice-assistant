@@ -6,8 +6,8 @@ import asyncio
 import logging
 from config_loader import get_config
 from wyoming.client import AsyncTcpClient
-from wyoming.tts import Synthesize
-from wyoming.audio import AudioChunk, AudioStop
+from wyoming.tts import Synthesize, SynthesizeVoice, SynthesizeStopped
+from wyoming.audio import AudioChunk, AudioStop, AudioStart
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +18,22 @@ tts_cfg = cfg.get("tts", {}) if cfg else {}
 async def _synthesize(text: str) -> bytes:
     host = tts_cfg.get("host", "127.0.0.1")
     port = int(tts_cfg.get("port", 10200))
-    voice = tts_cfg.get("voice", "en_US-lessac-medium")
+    voice_name = tts_cfg.get("voice", "en_US-lessac-medium")
 
     audio_out = bytearray()
     async with AsyncTcpClient(host, port) as client:
-        await client.write(Synthesize(text=text, voice=voice).to_message())
+        await client.write_event(
+            Synthesize(text=text, voice=SynthesizeVoice(name=voice_name)).event()
+        )
 
-        async for message in client:
-            if AudioChunk.is_type(message.type):
-                chunk = AudioChunk.from_message(message)
-                audio_out.extend(chunk.data)
-            elif AudioStop.is_type(message.type):
+        while True:
+            event = await client.read_event()
+            if event is None:
+                break
+            if AudioChunk.is_type(event.type):
+                chunk = AudioChunk.from_event(event)
+                audio_out.extend(chunk.audio)
+            elif AudioStop.is_type(event.type) or SynthesizeStopped.is_type(event.type):
                 break
 
     return bytes(audio_out)

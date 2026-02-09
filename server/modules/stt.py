@@ -6,7 +6,7 @@ import asyncio
 import logging
 from config_loader import get_config
 from wyoming.client import AsyncTcpClient
-from wyoming.asr import Transcribe, Transcription
+from wyoming.asr import Transcribe, Transcript
 from wyoming.audio import AudioChunk, AudioStop, AudioStart
 
 logger = logging.getLogger(__name__)
@@ -24,20 +24,30 @@ async def _transcribe(audio_data: bytes) -> str:
     channels = int(stt_cfg.get("channels", 1))
 
     async with AsyncTcpClient(host, port) as client:
-        await client.write(Transcribe(language=language).to_message())
-        await client.write(
+        await client.write_event(Transcribe(language=language).event())
+        await client.write_event(
             AudioStart(
                 rate=sample_rate,
                 width=sample_width,
                 channels=channels,
-            ).to_message()
+            ).event()
         )
-        await client.write(AudioChunk(data=audio_data).to_message())
-        await client.write(AudioStop().to_message())
+        await client.write_event(
+            AudioChunk(
+                rate=sample_rate,
+                width=sample_width,
+                channels=channels,
+                audio=audio_data,
+            ).event()
+        )
+        await client.write_event(AudioStop().event())
 
-        async for message in client:
-            if Transcription.is_type(message.type):
-                transcription = Transcription.from_message(message)
+        while True:
+            event = await client.read_event()
+            if event is None:
+                break
+            if Transcript.is_type(event.type):
+                transcription = Transcript.from_event(event)
                 return transcription.text
     return ""
 
