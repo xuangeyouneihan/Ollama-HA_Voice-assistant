@@ -37,8 +37,9 @@ home_assistant:
   auto_discover: true
 
 audio:
-  sample_rate: 48000 # 录音用声卡支持的采样率
-  channels: 1
+  sample_rate: 48000
+  input_channels: 1
+  output_channels: 2
   input_device: 6
   output_device: 6
   format: int16
