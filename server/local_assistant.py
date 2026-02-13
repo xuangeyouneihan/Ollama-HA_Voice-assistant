@@ -25,6 +25,18 @@ OUTPUT_DEVICE = audio_cfg.get("output_device") if audio_cfg.get("output_device")
 TTS_RATE = int(tts_cfg.get("sample_rate", SAMPLE_RATE))
 
 
+def _describe_device(device, kind: str):
+    """辅助调试：打印输入/输出设备实际解析结果。"""
+    try:
+        info = sd.query_devices(device, kind=kind)
+        logger.info("%s设备: idx=%s name=%s sr_max=%s in_ch=%s out_ch=%s",
+                    "输入" if kind == "input" else "输出",
+                    info.get("index"), info.get("name"), info.get("default_samplerate"),
+                    info.get("max_input_channels"), info.get("max_output_channels"))
+    except Exception as exc:  # 查询失败时仅告警
+        logger.warning("无法查询%s设备 %s: %s", "输入" if kind == "input" else "输出", device, exc)
+
+
 def record_once() -> bytes:
     """按回车开始录音，再次按回车结束，返回原始PCM字节。"""
     frames = []
@@ -35,6 +47,7 @@ def record_once() -> bytes:
         frames.append(indata.copy())
 
     input("按回车开始录音...")
+    _describe_device(INPUT_DEVICE, "input")
     with sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=CHANNELS,
@@ -53,6 +66,7 @@ def record_once() -> bytes:
 def play_audio(raw_audio: bytes):
     if not raw_audio:
         return
+    _describe_device(OUTPUT_DEVICE, "output")
     audio = np.frombuffer(raw_audio, dtype=np.int16)
     sd.play(audio, samplerate=TTS_RATE, device=OUTPUT_DEVICE)
     sd.wait()
