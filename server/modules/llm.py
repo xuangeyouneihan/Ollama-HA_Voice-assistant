@@ -15,6 +15,14 @@ OLLAMA_HOST = llm_cfg.get("host", "http://localhost:11434").rstrip("/")
 OLLAMA_URL = f"{OLLAMA_HOST}/api/generate"
 MODEL_NAME = llm_cfg.get("model", "phi3:mini")
 TIMEOUT = llm_cfg.get("timeout", 60)
+SYSTEM_PROMPT = llm_cfg.get(
+    "system_prompt",
+    "You are a voice assistant for Home Assistant.\n"
+    "Answer questions about the world truthfully.\n"
+    "Answer in plain text. Keep it simple and to the point.",
+)
+TEMPERATURE = llm_cfg.get("temperature", 0.7)
+MAX_TOKENS = llm_cfg.get("max_tokens", 500)
 
 def generate_response(prompt):
     """
@@ -32,10 +40,12 @@ def generate_response(prompt):
     
     data = {
         "model": MODEL_NAME,
+        "system": SYSTEM_PROMPT,
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.7,
+            "temperature": TEMPERATURE,
+            "num_predict": MAX_TOKENS,
             "top_p": 0.9,
             "top_k": 40
         }

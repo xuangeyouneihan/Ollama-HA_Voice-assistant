@@ -13,6 +13,10 @@ stt:
   sample_rate: 48000
   sample_width: 2 # bytes, 16-bit
   channels: 1
+  target_sample_rate: 16000
+  target_sample_width: 2
+  target_channels: 1
+  chunk_ms: 30
 
 tts:
   engine: wyoming
@@ -30,6 +34,10 @@ llm:
   temperature: 0.6
   max_tokens: 500
   timeout: 120
+  system_prompt: |
+    You are a voice assistant for Home Assistant.
+    Answer questions about the world truthfully.
+    Answer in plain text. Keep it simple and to the point.
 
 home_assistant:
   enabled: true
@@ -43,7 +51,10 @@ audio:
   input_device: 6
   output_device: 6
   format: int16
-  buffer_size: 1024
+  buffer_size: 2048
+  monitor_input: false
+  input_gain: 1
+  start_drop_ms: 0
 
 logging:
   level: INFO
