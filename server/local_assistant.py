@@ -11,7 +11,7 @@ import numpy as np
 import sounddevice as sd
 
 from config_loader import get_config
-from modules import stt, tts, llm, ha_client
+from modules import stt, tts, ha_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("local_assistant")
@@ -233,10 +233,7 @@ def handle_once():
     )
     print(f"识别: {text}")
 
-    if ha_client.is_ha_command(text):
-        reply = ha_client.process_command(text)
-    else:
-        reply = llm.generate_response(text)
+    reply = ha_client.handle_user_text(text)
 
     print(f"回复: {reply}")
 

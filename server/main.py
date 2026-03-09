@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 import logging
-from modules import stt, tts, llm, ha_client, audio_stream
+from modules import stt, tts, ha_client, audio_stream
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -42,15 +42,9 @@ async def audio_endpoint(websocket: WebSocket):
             if not text or text.strip() == "":
                 continue  # Skip empty transcriptions
             
-            # Process the text and generate response
-            if ha_client.is_ha_command(text):
-                # Handle Home Assistant commands
-                response = ha_client.process_command(text)
-                logger.info(f"HA response: {response}")
-            else:
-                # Handle general queries with LLM
-                response = llm.generate_response(text)
-                logger.info(f"LLM response: {response}")
+            # Route all text through LLM first, then execute HA actions/queries only when needed.
+            response = ha_client.handle_user_text(text)
+            logger.info(f"Assistant response: {response}")
             
             # Convert response text to audio using TTS
             audio_response = tts.synthesize(response)
