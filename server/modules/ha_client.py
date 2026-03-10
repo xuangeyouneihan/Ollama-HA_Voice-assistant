@@ -121,6 +121,11 @@ QUERY_KEYWORDS = {
     "what", "when", "where", "who", "which", "how", "temperature", "weather", "status",
 }
 
+HOME_CONTEXT_KEYWORDS = {
+    "home assistant", "ha", "家里", "家中", "设备", "实体", "自动化", "场景",
+    "灯", "开关", "空调", "风扇", "窗帘", "门锁", "温度", "湿度", "天气", "传感器",
+}
+
 DOMAIN_HINTS = {
     "天气": "weather",
     "weather": "weather",
@@ -306,7 +311,7 @@ def _detect_intent_rule(text: str) -> str:
 
     if any(k in lowered for k in CONTROL_KEYWORDS):
         return "control"
-    if any(k in lowered for k in QUERY_KEYWORDS):
+    if any(k in lowered for k in QUERY_KEYWORDS) and _has_home_context_signal(text):
         return "query"
     return "none"
 
@@ -399,9 +404,18 @@ def _match_entities_by_slots(states: list[dict], slots: dict, limit: int = 8) ->
 
 def _is_ha_related_rule(text: str) -> bool:
     lowered = (text or "").lower()
-    if any(k in lowered for k in CONTROL_KEYWORDS | QUERY_KEYWORDS):
+    if any(k in lowered for k in CONTROL_KEYWORDS):
         return True
+    if _has_home_context_signal(text):
+        return True
+    return False
+
+
+def _has_home_context_signal(text: str) -> bool:
+    lowered = (text or "").lower()
     if any(k in lowered for k in DOMAIN_HINTS.keys()):
+        return True
+    if any(k in lowered for k in HOME_CONTEXT_KEYWORDS):
         return True
     return False
 
@@ -539,28 +553,20 @@ def handle_user_text(text: str) -> str:
     if not text or not text.strip():
         return "I didn't catch that."
 
-    # Home Assistant style: first try deterministic intent detection.
-    rule_intent = _detect_intent_rule(text)
-    rule_ha_related = _is_ha_related_rule(text)
+    # HA-like flow: intent recognition first, then fallback on no_intent_match.
+    route = _route_with_llm(text)
+    recognition = _recognize_ha_intent_like_ha(text, route)
+    intent = recognition.get("intent", "none")
+    logger.info(
+        "Intent recognition: matched=%s, reason=%s, intent=%s",
+        recognition.get("matched"),
+        recognition.get("reason"),
+        intent,
+    )
 
-    route = {}
-    # Only invoke router LLM when rule-based intent/HA-relatedness is uncertain.
-    if rule_intent == "none" or not rule_ha_related:
-        route = _route_with_llm(text)
-
-    ha_related = rule_ha_related or bool(route.get("ha_related", False))
-    intent = rule_intent if rule_intent != "none" else str(route.get("intent", "none")).lower().strip()
-    logger.info("Router decision: ha_related=%s, intent=%s", ha_related, intent)
-
-    if not ha_related:
-        # For factual questions, still force HA-grounded answering to avoid hallucination.
-        if _looks_like_information_request(text):
-            logger.info("Info request detected, querying Home Assistant entities for grounded answer")
-            states = discover_entities()
-            return _answer_with_entities_grounded(text, states)
-
+    if not recognition.get("matched"):
         answer = (route.get("answer") or "").strip()
-        return answer or "我不确定。"
+        return answer or llm.generate_response(text, temperature=0.5, max_tokens=220, retry_on_empty=True)
 
     logger.info("HA-related request detected, querying Home Assistant entities")
     states = discover_entities()
@@ -1274,6 +1280,22 @@ def _looks_like_information_request(text: str) -> bool:
     if not text_lower:
         return False
     return any(k in text_lower for k in QUERY_KEYWORDS)
+
+
+def _recognize_ha_intent_like_ha(text: str, route: dict) -> dict:
+    """Two-stage recognition similar to HA's intent-first behavior."""
+    strict_intent = _detect_intent_rule(text)
+    if strict_intent in {"control", "query"}:
+        return {"matched": True, "intent": strict_intent, "reason": "strict"}
+
+    routed_intent = str((route or {}).get("intent", "none")).strip().lower()
+    routed_ha_related = bool((route or {}).get("ha_related", False))
+    if routed_intent in {"control", "query"} and (
+        routed_ha_related or _has_home_context_signal(text)
+    ):
+        return {"matched": True, "intent": routed_intent, "reason": "router"}
+
+    return {"matched": False, "intent": "none", "reason": "no_intent_match"}
 
 
 def _build_service_map(services: list[dict]) -> dict:
