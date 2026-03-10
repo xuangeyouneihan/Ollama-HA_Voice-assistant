@@ -17,6 +17,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("local_assistant")
 
 cfg = get_config()
+
+
+
 audio_cfg = cfg.get("audio", {}) if cfg else {}
 tts_cfg = cfg.get("tts", {}) if cfg else {}
 
@@ -32,6 +35,10 @@ INPUT_GAIN = float(audio_cfg.get("input_gain", 1.8))
 TRIM_SILENCE = bool(audio_cfg.get("trim_silence", True))
 SILENCE_THRESHOLD = int(audio_cfg.get("silence_threshold", 700))
 SILENCE_KEEP_MS = int(audio_cfg.get("silence_keep_ms", 120))
+SILENCE_THRESHOLD_MIN = int(audio_cfg.get("silence_threshold_min", 120))
+SILENCE_THRESHOLD_RATIO = float(audio_cfg.get("silence_threshold_ratio", 0.22))
+SILENCE_SMOOTH_MS = int(audio_cfg.get("silence_smooth_ms", 20))
+SILENCE_MAX_HEAD_TRIM_MS = int(audio_cfg.get("silence_max_head_trim_ms", 300))
 DEBUG_SAVE_WAV = bool(audio_cfg.get("debug_save_wav", False))
 DEBUG_WAV_PATH = str(audio_cfg.get("debug_wav_path", "server/debug_last_record.wav"))
 MONITOR_INPUT = bool(audio_cfg.get("monitor_input", False))
@@ -76,24 +83,67 @@ def _trim_silence_pcm16(
 
     audio = np.frombuffer(audio_bytes, dtype=np.int16)
     keep_frames = int(sample_rate * keep_ms / 1000)
+    max_head_trim_frames = int(sample_rate * SILENCE_MAX_HEAD_TRIM_MS / 1000)
+    smooth_frames = max(int(sample_rate * SILENCE_SMOOTH_MS / 1000), 1)
+
+    def _moving_average(arr: np.ndarray, window: int) -> np.ndarray:
+        if window <= 1 or arr.size == 0:
+            return arr
+        kernel = np.ones(window, dtype=np.float32) / float(window)
+        return np.convolve(arr.astype(np.float32), kernel, mode="same")
+
+    def _pick_threshold(energy: np.ndarray, configured_threshold: int) -> int:
+        if energy.size == 0:
+            return configured_threshold
+
+        peak = float(np.max(energy))
+        p95 = float(np.percentile(energy, 95))
+        dynamic = max(SILENCE_THRESHOLD_MIN, int(max(peak, p95) * SILENCE_THRESHOLD_RATIO))
+        # Prefer lower (more permissive) threshold when speech volume is low.
+        picked = min(configured_threshold, dynamic)
+        return max(SILENCE_THRESHOLD_MIN, picked)
 
     if channels > 1:
         usable = (len(audio) // channels) * channels
         audio = audio[:usable].reshape(-1, channels)
         energy = np.max(np.abs(audio), axis=1)
-        active = np.where(energy > threshold)[0]
+        energy_smooth = _moving_average(energy, smooth_frames)
+        adaptive_threshold = _pick_threshold(energy_smooth, threshold)
+        active = np.where(energy_smooth > adaptive_threshold)[0]
         if len(active) == 0:
             return audio_bytes
-        start = max(int(active[0]) - keep_frames, 0)
+        start_candidate = max(int(active[0]) - keep_frames, 0)
+        start = min(start_candidate, max_head_trim_frames)
         end = min(int(active[-1]) + keep_frames + 1, len(audio))
+        logger.info(
+            "静音裁剪参数(多声道): threshold=%s adaptive=%s peak=%s p95=%s start=%sms end=%sms",
+            threshold,
+            adaptive_threshold,
+            int(np.max(energy_smooth)) if energy_smooth.size else 0,
+            int(np.percentile(energy_smooth, 95)) if energy_smooth.size else 0,
+            int(start * 1000 / sample_rate),
+            int(end * 1000 / sample_rate),
+        )
         return audio[start:end].tobytes()
 
     energy = np.abs(audio)
-    active = np.where(energy > threshold)[0]
+    energy_smooth = _moving_average(energy, smooth_frames)
+    adaptive_threshold = _pick_threshold(energy_smooth, threshold)
+    active = np.where(energy_smooth > adaptive_threshold)[0]
     if len(active) == 0:
         return audio_bytes
-    start = max(int(active[0]) - keep_frames, 0)
+    start_candidate = max(int(active[0]) - keep_frames, 0)
+    start = min(start_candidate, max_head_trim_frames)
     end = min(int(active[-1]) + keep_frames + 1, len(audio))
+    logger.info(
+        "静音裁剪参数: threshold=%s adaptive=%s peak=%s p95=%s start=%sms end=%sms",
+        threshold,
+        adaptive_threshold,
+        int(np.max(energy_smooth)) if energy_smooth.size else 0,
+        int(np.percentile(energy_smooth, 95)) if energy_smooth.size else 0,
+        int(start * 1000 / sample_rate),
+        int(end * 1000 / sample_rate),
+    )
     return audio[start:end].tobytes()
 
 
@@ -246,11 +296,19 @@ def handle_once():
 
 def main():
     print("本地语音助手已启动。输入 q 后回车退出。")
-    while True:
-        cmd = input("按回车开始一次对话，或输入 q 后回车退出: ")
-        if cmd.strip().lower() == "q":
-            break
-        handle_once()
+    try:
+        while True:
+            cmd = input("按回车开始一次对话，或输入 q 后回车退出: ")
+            if cmd.strip().lower() == "q":
+                break
+            handle_once()
+    except KeyboardInterrupt:
+        print("\n已中断，正在安全退出...")
+    finally:
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

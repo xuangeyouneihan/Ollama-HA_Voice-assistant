@@ -4,6 +4,7 @@ Uses Wyoming ASR services (e.g., wyoming-faster-whisper)
 """
 import asyncio
 import logging
+import re
 from config_loader import get_config
 from wyoming.client import AsyncTcpClient
 from wyoming.asr import Transcribe, Transcript
@@ -17,6 +18,8 @@ TARGET_RATE = int(stt_cfg.get("target_sample_rate", 16000))
 TARGET_WIDTH = int(stt_cfg.get("target_sample_width", 2))
 TARGET_CHANNELS = int(stt_cfg.get("target_channels", 1))
 CHUNK_MS = int(stt_cfg.get("chunk_ms", 30))
+READ_TIMEOUT_S = float(stt_cfg.get("read_timeout_s", 1.2))
+RETRY_ON_GARBLED = bool(stt_cfg.get("retry_on_garbled", True))
 
 
 def _iter_audio_chunks(audio_bytes: bytes, bytes_per_chunk: int):
@@ -83,14 +86,42 @@ async def _transcribe(
 
         await client.write_event(AudioStop().event())
 
+        latest_text = ""
         while True:
-            event = await client.read_event()
+            try:
+                event = await asyncio.wait_for(client.read_event(), timeout=READ_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # No more events for a while; use the latest transcript we have.
+                break
+
             if event is None:
                 break
+
             if Transcript.is_type(event.type):
                 transcription = Transcript.from_event(event)
-                return transcription.text
-    return ""
+                text = (transcription.text or "").strip()
+                if text:
+                    latest_text = text
+
+        return latest_text
+
+
+def _looks_garbled(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+
+    # Detect patterns like: "i 是 y y y y y" (many single-letter tokens).
+    tokens = cleaned.split()
+    single_alpha_tokens = [t for t in tokens if len(t) == 1 and t.isalpha()]
+    if len(tokens) >= 5 and len(single_alpha_tokens) / max(len(tokens), 1) >= 0.45:
+        return True
+
+    # Excessive repeated same latin letter with separators.
+    if re.search(r"\b([a-zA-Z])(?:\s+\1){4,}\b", cleaned):
+        return True
+
+    return False
 
 
 def transcribe(
@@ -101,7 +132,7 @@ def transcribe(
 ) -> str:
     """Transcribe audio via Wyoming ASR service."""
     try:
-        return asyncio.run(
+        text = asyncio.run(
             _transcribe(
                 audio_data,
                 sample_rate=sample_rate,
@@ -109,6 +140,19 @@ def transcribe(
                 channels=channels,
             )
         )
+        if RETRY_ON_GARBLED and _looks_garbled(text):
+            logger.warning("Detected garbled STT transcript, retrying once")
+            text_retry = asyncio.run(
+                _transcribe(
+                    audio_data,
+                    sample_rate=sample_rate,
+                    sample_width=sample_width,
+                    channels=channels,
+                )
+            )
+            if text_retry and not _looks_garbled(text_retry):
+                return text_retry
+        return text
     except Exception as exc:  # Wyoming connection or protocol errors
         logger.error(f"STT error: {exc}")
         return f"STT Error: {exc}"

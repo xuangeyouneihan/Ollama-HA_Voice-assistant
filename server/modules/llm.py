@@ -24,7 +24,7 @@ SYSTEM_PROMPT = llm_cfg.get(
 TEMPERATURE = llm_cfg.get("temperature", 0.7)
 MAX_TOKENS = llm_cfg.get("max_tokens", 500)
 
-def generate_response(prompt):
+def generate_response(prompt, temperature=None, max_tokens=None, retry_on_empty=True):
     """
     Generate response using local LLM via Ollama
     
@@ -38,30 +38,52 @@ def generate_response(prompt):
         logger.warning("Empty prompt provided to LLM")
         return "I didn't understand that."
     
-    data = {
-        "model": MODEL_NAME,
-        "system": SYSTEM_PROMPT,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": TEMPERATURE,
-            "num_predict": MAX_TOKENS,
-            "top_p": 0.9,
-            "top_k": 40
-        }
-    }
-    
+    use_temperature = TEMPERATURE if temperature is None else float(temperature)
+    use_max_tokens = MAX_TOKENS if max_tokens is None else int(max_tokens)
+
     try:
-        response = requests.post(OLLAMA_URL, json=data, timeout=TIMEOUT)
-        
-        if response.status_code == 200:
+        max_attempts = 2 if retry_on_empty else 1
+        for attempt in range(max_attempts):
+            current_prompt = prompt
+            current_temperature = use_temperature
+            if attempt > 0:
+                # Retry with a stricter, short instruction to avoid blank generations.
+                current_prompt = (
+                    f"{prompt}\n\n"
+                    "IMPORTANT: Return a non-empty plain text answer. Do not return ellipsis."
+                )
+                current_temperature = min(use_temperature, 0.1)
+
+            data = {
+                "model": MODEL_NAME,
+                "system": SYSTEM_PROMPT,
+                "prompt": current_prompt,
+                "stream": False,
+                "options": {
+                    "temperature": current_temperature,
+                    "num_predict": use_max_tokens,
+                    "top_p": 0.9,
+                    "top_k": 40,
+                },
+            }
+
+            response = requests.post(OLLAMA_URL, json=data, timeout=TIMEOUT)
+
+            if response.status_code != 200:
+                logger.error(f"LLM API error: {response.status_code} - {response.text}")
+                return "Sorry, I'm having trouble thinking right now."
+
             result = response.json()
-            response_text = result.get('response', 'No response generated')
+            response_text = (result.get("response") or "").strip()
             logger.info(f"LLM generated response: {response_text[:100]}...")
-            return response_text
-        else:
-            logger.error(f"LLM API error: {response.status_code} - {response.text}")
-            return "Sorry, I'm having trouble thinking right now."
+
+            if response_text and response_text not in {"...", "…"}:
+                return response_text
+
+            if attempt < max_attempts - 1:
+                logger.warning("LLM returned empty response, retrying once with stricter instruction")
+
+        return ""
             
     except requests.exceptions.ConnectionError:
         logger.error("Cannot connect to Ollama server")

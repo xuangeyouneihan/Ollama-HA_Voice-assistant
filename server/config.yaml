@@ -17,6 +17,8 @@ stt:
   target_sample_width: 2
   target_channels: 1
   chunk_ms: 30
+  read_timeout_s: 1.2
+  retry_on_garbled: true
 
 tts:
   engine: wyoming
@@ -35,14 +37,24 @@ llm:
   max_tokens: 500
   timeout: 120
   system_prompt: |
-    You are a voice assistant for Home Assistant.
-    Answer questions about the world truthfully.
-    Answer in plain text. Keep it simple and to the point.
+    You are a Home Assistant voice assistant.
+    For smart-home tasks, always rely on provided Home Assistant entities/services context.
+    Never invent entities, states, services, or capabilities outside provided context.
+    If context is insufficient, explicitly say you do not know.
+    Keep replies concise and plain text.
 
 home_assistant:
   enabled: true
   url: http://homeassistant.local:8123
   auto_discover: true
+  response_language: zh-CN
+  default_area: 客厅
+  area_aliases:
+    客厅:
+      - 客厅
+      - 大厅
+      - living room
+      - livingroom
 
 audio:
   sample_rate: 48000
@@ -55,6 +67,15 @@ audio:
   monitor_input: false
   input_gain: 1
   start_drop_ms: 0
+  trim_silence: true
+  silence_threshold: 700
+  silence_keep_ms: 120
+  silence_threshold_min: 120
+  silence_threshold_ratio: 0.22
+  silence_smooth_ms: 20
+  silence_max_head_trim_ms: 300
+  debug_save_wav: false
+  debug_wav_path: server/debug_last_record.wav
 
 logging:
   level: INFO
