@@ -11,6 +11,56 @@ A privacy-focused, offline-capable smart speaker system using local LLMs and Hom
 - **Open Source**: Fully customizable and transparent
 - **Arduino IDE Compatible**: Easy ESP32 firmware setup
 
+## Preset Workflow (No Real Devices Required)
+
+You can build and test automation presets before smart devices are ready.
+
+### What is available now
+
+- Preset CRUD API in server
+- Preset simulation API (no real HA call)
+- Compile preset to Home Assistant script/automation dictionaries
+
+### API endpoints
+
+- `GET /presets`
+- `GET /presets/{preset_id}`
+- `POST /presets`
+- `PUT /presets/{preset_id}`
+- `DELETE /presets/{preset_id}`
+- `POST /presets/{preset_id}/simulate`
+- `POST /presets/{preset_id}/compile-ha`
+
+### Minimal preset payload example
+
+```json
+{
+   "name": "Rain Close Cover",
+   "enabled": true,
+   "trigger": {
+      "type": "state",
+      "entity_id": "binary_sensor.rain_detected",
+      "to": "on"
+   },
+   "conditions": [
+      {
+         "type": "time",
+         "after": "06:00:00",
+         "before": "23:00:00"
+      }
+   ],
+   "actions": [
+      {
+         "service": "cover.close_cover",
+         "target": {
+            "entity_id": ["cover.living_room"]
+         },
+         "service_data": {}
+      }
+   ]
+}
+```
+
 ## Hardware Requirements
 
 ### Server (Raspberry Pi 4/5 or Linux computer)

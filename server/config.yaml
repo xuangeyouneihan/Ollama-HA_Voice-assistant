@@ -56,6 +56,9 @@ home_assistant:
       - living room
       - livingroom
 
+presets:
+  storage_file: server/data/presets.json
+
 audio:
   sample_rate: 48000
   input_channels: 1

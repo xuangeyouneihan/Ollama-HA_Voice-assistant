@@ -3,13 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 import logging
-from modules import stt, tts, ha_client, audio_stream
+from modules import stt, tts, ha_client, audio_stream, presets
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="HumbleVoice Server")
+preset_store = presets.build_store_from_config()
 
 # CORS middleware for development
 app.add_middleware(
@@ -80,6 +81,73 @@ async def health_check():
         "status": "healthy",
         "service": "humblevoice-server",
         "version": "1.0.0"
+    }
+
+
+@app.get("/presets")
+async def list_presets():
+    return {"items": preset_store.list_presets()}
+
+
+@app.get("/presets/{preset_id}")
+async def get_preset(preset_id: str):
+    item = preset_store.get_preset(preset_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return item
+
+
+@app.post("/presets")
+async def create_preset(payload: dict):
+    try:
+        created = preset_store.create_preset(payload)
+        return created
+    except presets.PresetValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/presets/{preset_id}")
+async def update_preset(preset_id: str, payload: dict):
+    try:
+        updated = preset_store.update_preset(preset_id, payload)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Preset not found")
+        return updated
+    except presets.PresetValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/presets/{preset_id}")
+async def delete_preset(preset_id: str):
+    ok = preset_store.delete_preset(preset_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"deleted": True}
+
+
+@app.post("/presets/{preset_id}/compile-ha")
+async def compile_preset_ha(preset_id: str):
+    item = preset_store.get_preset(preset_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return presets.compile_preset_to_ha(item)
+
+
+@app.post("/presets/{preset_id}/simulate")
+async def simulate_preset(preset_id: str):
+    item = preset_store.get_preset(preset_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+    # Device-agnostic simulation: returns the execution plan only.
+    return {
+        "preset_id": preset_id,
+        "name": item.get("name"),
+        "enabled": item.get("enabled", True),
+        "trigger": item.get("trigger", {}),
+        "conditions": item.get("conditions", []),
+        "actions": item.get("actions", []),
+        "note": "Simulation mode only. No real service call was executed.",
     }
 
 if __name__ == "__main__":
