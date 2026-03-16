@@ -6,9 +6,11 @@ import requests
 import json
 import logging
 import re
+import os
+import yaml
 from urllib.parse import urlparse
 from config_loader import get_config
-from modules import llm
+from modules import llm, presets
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,21 @@ DEFAULT_AREA_ALIASES = {
     "厨房": ["厨房", "kitchen"],
     "卫生间": ["卫生间", "厕所", "浴室", "bathroom"],
 }
+
+TASK_CREATION_KEYWORDS = {
+    "计划任务", "自动化任务", "创建自动化", "创建计划", "定时", "每天", "每周", "每月",
+    "到点", "如果", "当", "schedule", "scheduled", "automation", "create automation",
+}
+
+TASK_UPDATE_KEYWORDS = {
+    "修改任务", "更新任务", "编辑任务", "调整任务", "改成", "改为", "change task", "update task", "edit task",
+}
+
+TASK_DELETE_KEYWORDS = {
+    "删除任务", "取消任务", "移除任务", "删掉任务", "delete task", "remove task", "cancel automation",
+}
+
+_preset_store = presets.build_store_from_config()
 
 
 def _area_aliases() -> dict[str, list[str]]:
@@ -568,10 +585,22 @@ def handle_user_text(text: str) -> str:
         answer = (route.get("answer") or "").strip()
         return answer or llm.generate_response(text, temperature=0.5, max_tokens=220, retry_on_empty=True)
 
+    if intent == "task_create":
+        task_result = create_ha_task_from_text(text)
+        return _summarize_task_creation_with_llm(text, task_result)
+
+    if intent in {"task_update", "task_delete"}:
+        task_result = manage_ha_task_from_text(text, expected_operation=intent)
+        return _summarize_task_management_with_llm(text, task_result)
+
     logger.info("HA-related request detected, querying Home Assistant entities")
     states = discover_entities()
     if not states:
-        return "Home Assistant Error: Unable to fetch entity states"
+        return _summarize_failure_with_llm(
+            user_text=text,
+            failure_code="ha_states_unavailable",
+            technical_message="Home Assistant Error: Unable to fetch entity states",
+        )
 
     if intent == "query":
         return _handle_query_intent(text, route, states)
@@ -594,6 +623,807 @@ def process_command(text):
     return handle_user_text(text)
 
 
+def _is_task_creation_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return any(k in lowered for k in TASK_CREATION_KEYWORDS)
+
+
+def _is_task_update_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return any(k in lowered for k in TASK_UPDATE_KEYWORDS)
+
+
+def _is_task_delete_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return any(k in lowered for k in TASK_DELETE_KEYWORDS)
+
+
+def _summarize_entities_for_task_prompt(entities: list[dict], limit: int = 80) -> list[dict]:
+    out = []
+    for item in entities[:limit]:
+        if not isinstance(item, dict):
+            continue
+        entity_id = item.get("entity_id")
+        if not entity_id:
+            continue
+        attrs = item.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        out.append(
+            {
+                "entity_id": entity_id,
+                "friendly_name": attrs.get("friendly_name", ""),
+                "state": item.get("state", ""),
+                "unit": attrs.get("unit_of_measurement", ""),
+                "device_class": attrs.get("device_class", ""),
+            }
+        )
+    return out
+
+
+def _build_task_preset_with_llm(
+    text: str,
+    entities: list[dict],
+    services: list[dict],
+    retry_context: str | None = None,
+) -> dict:
+    entity_summaries = _summarize_entities_for_task_prompt(entities)
+    service_summaries = _summarize_services_for_prompt(services)
+
+    prompt = (
+        "You create Home Assistant task preset JSON from natural language.\n"
+        "Return ONLY JSON object with schema:\n"
+        "{\n"
+        "  \"name\": string,\n"
+        "  \"enabled\": true,\n"
+        "  \"trigger\": {\"type\": \"manual|time|state|event\", ...},\n"
+        "  \"conditions\": [{\"type\": \"state|numeric_state|time\", ...}],\n"
+        "  \"actions\": [{\"service\": \"domain.service\", \"target\": {\"entity_id\": [], \"area_id\": [], \"device_id\": []}, \"service_data\": {}, \"delay_s\": 0}]\n"
+        "}\n"
+        "Rules:\n"
+        "1) Prefer trigger.type=time or state for scheduled tasks when user says time/condition.\n"
+        "2) Choose action service from Services JSON only.\n"
+        "3) entity_id must be selected from Entities JSON only.\n"
+        "4) If not sure, keep target lists empty but ensure valid JSON schema.\n"
+        "5) time format must be HH:MM:SS.\n"
+        "6) Output only JSON, no markdown.\n"
+        f"User text: {text}\n"
+        f"Entities JSON: {json.dumps(entity_summaries, ensure_ascii=False)}\n"
+        f"Services JSON: {json.dumps(service_summaries, ensure_ascii=False)}"
+    )
+
+    if retry_context:
+        prompt += f"\nRetry context: {retry_context}\n"
+
+    raw = llm.generate_response(prompt, temperature=0.1, max_tokens=420, retry_on_empty=True)
+    candidate = _extract_json_object(raw)
+    if not candidate:
+        raise ValueError("LLM did not return valid preset JSON")
+
+    return presets.normalize_and_validate_preset(candidate, is_update=False)
+
+
+def _validate_task_references_or_raise(preset_payload: dict, states: list[dict], services: list[dict]) -> None:
+    """Hard validation for task actions: service callable + entity exists."""
+    if not isinstance(preset_payload, dict):
+        raise ValueError("invalid preset payload")
+
+    state_ids = set()
+    for item in states or []:
+        if not isinstance(item, dict):
+            continue
+        entity_id = str(item.get("entity_id") or "").strip()
+        if entity_id:
+            state_ids.add(entity_id)
+
+    service_ids = set()
+    for item in services or []:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").strip()
+        service = str(item.get("service") or "").strip()
+        if domain and service:
+            service_ids.add(f"{domain}.{service}")
+
+    actions = preset_payload.get("actions") or []
+    if not isinstance(actions, list):
+        raise ValueError("actions must be a list")
+
+    for idx, action in enumerate(actions):
+        if not isinstance(action, dict):
+            raise ValueError(f"action[{idx}] must be an object")
+
+        service = str(action.get("service") or "").strip()
+        if not service:
+            raise ValueError(f"action[{idx}].service is required")
+        if service_ids and service not in service_ids:
+            raise ValueError(f"action[{idx}].service not callable in HA: {service}")
+
+        target = action.get("target") or {}
+        if not isinstance(target, dict):
+            continue
+
+        entity_ids = target.get("entity_id") or []
+        if isinstance(entity_ids, str):
+            entity_ids = [entity_ids]
+        if not isinstance(entity_ids, list):
+            entity_ids = []
+
+        for entity_id in entity_ids:
+            eid = str(entity_id).strip()
+            if not eid:
+                continue
+            if eid not in state_ids:
+                raise ValueError(f"action[{idx}].target.entity_id not found in HA: {eid}")
+
+
+def _judge_hard_validation_failure_with_llm(
+    user_text: str,
+    operation: str,
+    candidate_payload: dict,
+    error_message: str,
+) -> dict:
+    prompt = (
+        "You analyze Home Assistant task-validation failure causes.\n"
+        "Return ONLY JSON with schema:\n"
+        "{\"classification\":\"llm_generation_error|user_intent_invalid|ambiguous\",\"should_retry\":bool,\"message\":string}\n"
+        "Rules:\n"
+        "1) llm_generation_error: user intent is reasonable but generated references are invalid. should_retry=true.\n"
+        "2) user_intent_invalid: user asked for unavailable/nonexistent things. should_retry=false.\n"
+        "3) ambiguous: not enough clarity. should_retry=false and ask user to clarify.\n"
+        f"Operation: {operation}\n"
+        f"User text: {user_text}\n"
+        f"Generated payload JSON: {json.dumps(candidate_payload, ensure_ascii=False)}\n"
+        f"Validation error: {error_message}"
+    )
+    raw = llm.generate_response(prompt, temperature=0.1, max_tokens=180, retry_on_empty=True)
+    parsed = _extract_json_object(raw)
+    if not isinstance(parsed, dict):
+        return {
+            "classification": "ambiguous",
+            "should_retry": False,
+            "message": "任务校验失败，请补充更明确的设备名或服务名。",
+        }
+
+    classification = str(parsed.get("classification") or "ambiguous").strip().lower()
+    should_retry = bool(parsed.get("should_retry", False))
+    message = str(parsed.get("message") or "").strip()
+
+    if classification not in {"llm_generation_error", "user_intent_invalid", "ambiguous"}:
+        classification = "ambiguous"
+    return {
+        "classification": classification,
+        "should_retry": should_retry,
+        "message": message,
+    }
+
+
+def _export_compiled_ha_yaml(compiled: dict, preset_id: str) -> dict:
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    output_dir = os.path.join(base_dir, "data", "ha_exports")
+    os.makedirs(output_dir, exist_ok=True)
+
+    script_path = os.path.join(output_dir, f"script_{preset_id}.yaml")
+    with open(script_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(compiled.get("script") or {}, f, allow_unicode=True, sort_keys=False)
+
+    automation_path = None
+    if compiled.get("automation"):
+        automation_path = os.path.join(output_dir, f"automation_{preset_id}.yaml")
+        with open(automation_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(compiled.get("automation") or {}, f, allow_unicode=True, sort_keys=False)
+
+    return {
+        "script_yaml_path": script_path,
+        "automation_yaml_path": automation_path,
+    }
+
+
+def create_ha_task_from_text(text: str) -> dict:
+    user_text = str(text or "").strip()
+    if not user_text:
+        return {"ok": False, "message": "text is required"}
+
+    states = discover_entities()
+    if not states:
+        return {
+            "ok": False,
+            "message": _summarize_failure_with_llm(
+                user_text=user_text,
+                failure_code="task_create_states_unavailable",
+                technical_message="Home Assistant Error: Unable to fetch entity states",
+            ),
+        }
+
+    services = discover_services()
+    if not services:
+        return {
+            "ok": False,
+            "message": _summarize_failure_with_llm(
+                user_text=user_text,
+                failure_code="task_create_services_unavailable",
+                technical_message="Home Assistant Error: Unable to fetch service list",
+            ),
+        }
+
+    retry_context = None
+    planned_candidate: dict = {}
+    last_error = None
+    for attempt in range(2):
+        try:
+            planned = _build_task_preset_with_llm(user_text, states, services, retry_context=retry_context)
+            planned_candidate = planned if isinstance(planned, dict) else {}
+            _validate_task_references_or_raise(planned_candidate, states, services)
+            created = _preset_store.create_preset(planned_candidate)
+            compiled = presets.compile_preset_to_ha(created)
+            exported = _export_compiled_ha_yaml(compiled, created.get("id") or "unknown")
+            return {
+                "ok": True,
+                "preset": created,
+                "compiled": compiled,
+                "exported": exported,
+            }
+        except Exception as exc:
+            last_error = str(exc)
+            logger.error("Create HA task from text failed (attempt %s): %s", attempt + 1, exc)
+
+            judge = _judge_hard_validation_failure_with_llm(
+                user_text=user_text,
+                operation="create",
+                candidate_payload=planned_candidate,
+                error_message=last_error,
+            )
+
+            if attempt == 0 and judge.get("classification") == "llm_generation_error" and judge.get("should_retry"):
+                retry_context = (
+                    "Previous generated task failed hard validation. "
+                    f"Error: {last_error}. "
+                    "Regenerate with strict valid service names and existing entity_ids only."
+                )
+                continue
+
+            judge_msg = str(judge.get("message") or "").strip()
+            if not judge_msg:
+                judge_msg = _summarize_failure_with_llm(
+                    user_text=user_text,
+                    failure_code="task_create_validation_failed",
+                    technical_message=f"创建自动化任务失败: {last_error}",
+                )
+            return {"ok": False, "message": judge_msg}
+
+    return {
+        "ok": False,
+        "message": _summarize_failure_with_llm(
+            user_text=user_text,
+            failure_code="task_create_unknown",
+            technical_message=f"创建自动化任务失败: {last_error or 'unknown error'}",
+        ),
+    }
+
+
+def _list_presets_for_prompt(limit: int = 80) -> list[dict]:
+    items = _preset_store.list_presets()
+    summaries = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        summaries.append(
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "enabled": item.get("enabled", True),
+                "trigger": item.get("trigger") or {},
+                "conditions": item.get("conditions") or [],
+                "actions": item.get("actions") or [],
+            }
+        )
+    return summaries
+
+
+def _plan_task_management_with_llm(text: str, preset_summaries: list[dict], retry_context: str | None = None) -> dict:
+    prompt = (
+        "You manage Home Assistant automation presets by natural language.\n"
+        "Return ONLY JSON with schema:\n"
+        "{\"operation\":\"update|delete|unknown\",\"preset_id\":\"\",\"name_hint\":\"\",\"changes\":{},\"reason\":\"\"}\n"
+        "Rules:\n"
+        "1) operation=delete only if user explicitly asks deletion/cancel/removal.\n"
+        "2) operation=update for edit/modify/change requests.\n"
+        "3) preset_id must be from Presets JSON ids if identifiable.\n"
+        "4) If id not identifiable, provide name_hint from user text.\n"
+        "5) changes must contain only fields that need update, using preset schema fields.\n"
+        "6) Output JSON only.\n"
+        f"User text: {text}\n"
+        f"Presets JSON: {json.dumps(preset_summaries, ensure_ascii=False)}"
+    )
+    if retry_context:
+        prompt += f"\nRetry context: {retry_context}\n"
+    raw = llm.generate_response(prompt, temperature=0.1, max_tokens=320, retry_on_empty=True)
+    return _extract_json_object(raw)
+
+
+def _resolve_preset_by_plan(plan: dict, presets_list: list[dict]) -> dict | None:
+    if not presets_list:
+        return None
+
+    preset_id = str(plan.get("preset_id") or "").strip()
+    if preset_id:
+        for item in presets_list:
+            if str(item.get("id")) == preset_id:
+                return item
+
+    name_hint = str(plan.get("name_hint") or "").strip().lower()
+    if name_hint:
+        for item in presets_list:
+            name = str(item.get("name") or "").strip().lower()
+            if name and (name_hint in name or name in name_hint):
+                return item
+
+    return None
+
+
+def manage_ha_task_from_text(text: str, expected_operation: str | None = None) -> dict:
+    user_text = str(text or "").strip()
+    if not user_text:
+        return {
+            "ok": False,
+            "message": _summarize_failure_with_llm(
+                user_text=text,
+                failure_code="task_manage_text_required",
+                technical_message="text is required",
+            ),
+            "operation": "unknown",
+        }
+
+    presets_list = _preset_store.list_presets()
+    if not presets_list:
+        return {
+            "ok": False,
+            "message": _summarize_failure_with_llm(
+                user_text=user_text,
+                failure_code="task_manage_no_presets",
+                technical_message="当前没有可修改或删除的任务",
+            ),
+            "operation": "unknown",
+        }
+
+    retry_context = None
+    for attempt in range(2):
+        plan = _plan_task_management_with_llm(user_text, _list_presets_for_prompt(), retry_context=retry_context)
+        operation = str(plan.get("operation") or "unknown").strip().lower()
+        if expected_operation in {"task_update", "task_delete"}:
+            forced = "update" if expected_operation == "task_update" else "delete"
+            if operation not in {"update", "delete"}:
+                operation = forced
+
+        target = _resolve_preset_by_plan(plan, presets_list)
+        if not target:
+            return {
+                "ok": False,
+                "message": _summarize_failure_with_llm(
+                    user_text=user_text,
+                    failure_code="task_manage_target_not_found",
+                    technical_message="无法定位要修改或删除的任务，请说出任务名称",
+                ),
+                "operation": operation,
+                "plan": plan,
+            }
+
+        target_id = str(target.get("id") or "").strip()
+        if not target_id:
+            return {
+                "ok": False,
+                "message": _summarize_failure_with_llm(
+                    user_text=user_text,
+                    failure_code="task_manage_target_missing_id",
+                    technical_message="目标任务缺少ID",
+                ),
+                "operation": operation,
+                "plan": plan,
+            }
+
+        if operation == "delete":
+            deleted = _preset_store.delete_preset(target_id)
+            if not deleted:
+                return {
+                    "ok": False,
+                    "message": _summarize_failure_with_llm(
+                        user_text=user_text,
+                        failure_code="task_delete_failed",
+                        technical_message="删除任务失败",
+                    ),
+                    "operation": operation,
+                    "target": target,
+                }
+            return {
+                "ok": True,
+                "operation": "delete",
+                "target": {"id": target_id, "name": target.get("name")},
+            }
+
+        if operation != "update":
+            return {
+                "ok": False,
+                "message": _summarize_failure_with_llm(
+                    user_text=user_text,
+                    failure_code="task_manage_intent_not_found",
+                    technical_message="没有识别到更新或删除意图",
+                ),
+                "operation": operation,
+                "plan": plan,
+            }
+
+        changes = plan.get("changes") or {}
+        if not isinstance(changes, dict) or not changes:
+            return {
+                "ok": False,
+                "message": _summarize_failure_with_llm(
+                    user_text=user_text,
+                    failure_code="task_update_no_changes",
+                    technical_message="没有识别到可更新的字段",
+                ),
+                "operation": "update",
+                "target": target,
+            }
+
+        try:
+            states = discover_entities()
+            if not states:
+                return {
+                    "ok": False,
+                    "message": _summarize_failure_with_llm(
+                        user_text=user_text,
+                        failure_code="task_update_states_unavailable",
+                        technical_message="Home Assistant Error: Unable to fetch entity states",
+                    ),
+                    "operation": "update",
+                }
+
+            services = discover_services()
+            if not services:
+                return {
+                    "ok": False,
+                    "message": _summarize_failure_with_llm(
+                        user_text=user_text,
+                        failure_code="task_update_services_unavailable",
+                        technical_message="Home Assistant Error: Unable to fetch service list",
+                    ),
+                    "operation": "update",
+                }
+
+            merged_candidate = dict(target)
+            merged_candidate.update(changes)
+            merged_candidate = presets.normalize_and_validate_preset(merged_candidate, is_update=True)
+            _validate_task_references_or_raise(merged_candidate, states, services)
+
+            updated = _preset_store.update_preset(target_id, changes)
+            if not updated:
+                return {
+                    "ok": False,
+                    "message": _summarize_failure_with_llm(
+                        user_text=user_text,
+                        failure_code="task_update_failed",
+                        technical_message="更新任务失败",
+                    ),
+                    "operation": "update",
+                    "target": target,
+                }
+
+            compiled = presets.compile_preset_to_ha(updated)
+            exported = _export_compiled_ha_yaml(compiled, updated.get("id") or target_id)
+            return {
+                "ok": True,
+                "operation": "update",
+                "preset": updated,
+                "compiled": compiled,
+                "exported": exported,
+                "changes": changes,
+            }
+        except Exception as exc:
+            logger.error("Update HA task from text failed (attempt %s): %s", attempt + 1, exc)
+
+            judge = _judge_hard_validation_failure_with_llm(
+                user_text=user_text,
+                operation="update",
+                candidate_payload={"target": target, "changes": changes},
+                error_message=str(exc),
+            )
+
+            if attempt == 0 and judge.get("classification") == "llm_generation_error" and judge.get("should_retry"):
+                retry_context = (
+                    "Previous update plan failed hard validation. "
+                    f"Error: {str(exc)}. "
+                    "Regenerate changes using only callable services and existing entity_ids."
+                )
+                continue
+
+            judge_msg = str(judge.get("message") or "").strip()
+            if not judge_msg:
+                judge_msg = _summarize_failure_with_llm(
+                    user_text=user_text,
+                    failure_code="task_update_validation_failed",
+                    technical_message=f"更新任务失败: {str(exc)}",
+                )
+            return {
+                "ok": False,
+                "message": judge_msg,
+                "operation": "update",
+                "target": target,
+            }
+
+    return {
+        "ok": False,
+        "message": _summarize_failure_with_llm(
+            user_text=user_text,
+            failure_code="task_update_retry_exceeded",
+            technical_message="更新任务失败: exceeded retry",
+        ),
+        "operation": "update",
+    }
+
+
+def _summarize_task_management_with_llm(user_text: str, result: dict) -> str:
+    lang = _detect_response_language(user_text)
+    fallback_fail = "任务操作失败" if _is_chinese_output(lang) else "Task operation failed."
+
+    if not isinstance(result, dict):
+        return fallback_fail
+
+    if not result.get("ok"):
+        msg = str(result.get("message") or "").strip() or fallback_fail
+        return _rewrite_result_with_llm(
+            user_text=user_text,
+            result_payload={"ok": False, "operation": result.get("operation"), "message": msg},
+            task_name="task_manage_failure_naturalization",
+            instruction="Explain task update/delete failure clearly and briefly.",
+            fallback_text=msg,
+            temperature=0.1,
+            max_tokens=120,
+        )
+
+    op = str(result.get("operation") or "").lower()
+    if op == "delete":
+        target = result.get("target") or {}
+        fallback_ok = (
+            f"已删除任务{target.get('name') or ''}，任务ID为{target.get('id') or 'unknown'}。"
+            if _is_chinese_output(lang)
+            else f"Deleted task {target.get('name') or ''} with ID {target.get('id') or 'unknown'}."
+        )
+        return _rewrite_result_with_llm(
+            user_text=user_text,
+            result_payload=result,
+            task_name="task_delete_result_naturalization",
+            instruction="Confirm deletion with task name and ID.",
+            fallback_text=fallback_ok,
+            temperature=0.1,
+            max_tokens=120,
+        )
+
+    preset = result.get("preset") or {}
+    fallback_ok = (
+        f"已更新任务{preset.get('name') or ''}，任务ID为{preset.get('id') or 'unknown'}，并重新导出了YAML。"
+        if _is_chinese_output(lang)
+        else f"Updated task {preset.get('name') or ''} with ID {preset.get('id') or 'unknown'}, and re-exported YAML."
+    )
+    return _rewrite_result_with_llm(
+        user_text=user_text,
+        result_payload=result,
+        task_name="task_update_result_naturalization",
+        instruction="Confirm update with task name and ID, and mention YAML re-export.",
+        fallback_text=fallback_ok,
+        temperature=0.1,
+        max_tokens=160,
+    )
+
+
+def _summarize_task_creation_with_llm(user_text: str, task_result: dict) -> str:
+    lang = _detect_response_language(user_text)
+    fallback_fail = "创建自动化任务失败" if _is_chinese_output(lang) else "Failed to create Home Assistant automation task."
+
+    if not isinstance(task_result, dict):
+        return fallback_fail
+
+    if not task_result.get("ok"):
+        msg = str(task_result.get("message") or "").strip()
+        if not msg:
+            return fallback_fail
+        rewritten_fail = _rewrite_result_with_llm(
+            user_text=user_text,
+            result_payload={"ok": False, "message": msg},
+            task_name="task_creation_failure_naturalization",
+            instruction="Rewrite the failure reason clearly for end users.",
+            fallback_text=msg or fallback_fail,
+            temperature=0.1,
+            max_tokens=120,
+        )
+        return rewritten_fail or msg or fallback_fail
+
+    created = task_result.get("preset") or {}
+    compiled = task_result.get("compiled") or {}
+    exported = task_result.get("exported") or {}
+    has_automation = bool(compiled.get("automation"))
+
+    summary_payload = {
+        "preset_name": created.get("name") or "",
+        "preset_id": created.get("id") or "",
+        "trigger_type": (created.get("trigger") or {}).get("type"),
+        "has_automation": has_automation,
+        "script_yaml_path": exported.get("script_yaml_path"),
+        "automation_yaml_path": exported.get("automation_yaml_path"),
+    }
+
+    fallback_ok = (
+        f"已创建计划任务{summary_payload.get('preset_name') or '未命名任务'}，"
+        f"任务ID为{summary_payload.get('preset_id') or 'unknown'}。"
+        "请将导出的YAML合并到Home Assistant后重载automation与script。"
+        if _is_chinese_output(lang)
+        else (
+            f"Created automation task {summary_payload.get('preset_name') or 'unnamed task'} "
+            f"with ID {summary_payload.get('preset_id') or 'unknown'}. "
+            "Merge the exported YAML into Home Assistant and reload automation and script."
+        )
+    )
+
+    rewritten_ok = _rewrite_result_with_llm(
+        user_text=user_text,
+        result_payload=summary_payload,
+        task_name="task_creation_result_naturalization",
+        instruction=(
+            "Mention task name and task ID. "
+            "If has_automation is true, say it is scheduled/automated and mention YAML export files. "
+            "If has_automation is false, say it is manual trigger and suggest adding time/condition."
+        ),
+        fallback_text=fallback_ok,
+        temperature=0.1,
+        max_tokens=180,
+    )
+    return rewritten_ok or fallback_ok
+
+
+def _normalize_match_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("_", " ").replace("-", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _input_select_supports_option(entity: dict, option: str) -> bool:
+    attrs = entity.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        return False
+    options = attrs.get("options")
+    if not isinstance(options, list):
+        return False
+    normalized = {_normalize_match_text(str(v)) for v in options if str(v).strip()}
+    return _normalize_match_text(str(option or "")) in normalized
+
+
+def _plan_mode_or_scene_action(
+    text: str,
+    states: list[dict],
+    service_map: dict,
+) -> dict:
+    lowered = _normalize_match_text(text)
+    if not lowered:
+        return {"actions": []}
+
+    has_mode_scene_signal = any(k in lowered for k in ["mode", "scene", "模式", "场景"])
+    has_switch_signal = any(k in lowered for k in ["切换", "switch", "set", "设置", "设为", "改为"])
+    if not (has_mode_scene_signal or has_switch_signal):
+        return {"actions": []}
+
+    scored_actions = []
+
+    # 1) Dynamic input_select option matching from live HA options.
+    if not service_map or "input_select.select_option" in service_map:
+        for item in states:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id") or "").strip()
+            if not entity_id.startswith("input_select."):
+                continue
+
+            attrs = item.get("attributes") or {}
+            if not isinstance(attrs, dict):
+                attrs = {}
+            options = attrs.get("options")
+            if not isinstance(options, list):
+                continue
+
+            friendly = _normalize_match_text(str(attrs.get("friendly_name") or ""))
+            object_id = _normalize_match_text(entity_id.split(".", 1)[1] if "." in entity_id else entity_id)
+
+            for option in options:
+                option_raw = str(option).strip()
+                option_norm = _normalize_match_text(option_raw)
+                if not option_norm:
+                    continue
+                if option_norm not in lowered:
+                    continue
+
+                score = 10
+                if "mode" in object_id or "模式" in object_id or "scene" in object_id or "场景" in object_id:
+                    score += 3
+                if friendly and ("mode" in friendly or "模式" in friendly or "scene" in friendly or "场景" in friendly):
+                    score += 3
+
+                scored_actions.append(
+                    (
+                        score,
+                        {
+                            "service": "input_select.select_option",
+                            "target": {"entity_id": [entity_id], "area_id": [], "device_id": []},
+                            "service_data": {"option": option_raw},
+                        },
+                    )
+                )
+
+    # 2) Dynamic scene matching from scene entities.
+    if not service_map or "scene.turn_on" in service_map:
+        for item in states:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id") or "").strip()
+            if not entity_id.startswith("scene."):
+                continue
+
+            attrs = item.get("attributes") or {}
+            if not isinstance(attrs, dict):
+                attrs = {}
+            friendly = _normalize_match_text(str(attrs.get("friendly_name") or ""))
+            object_id = _normalize_match_text(entity_id.split(".", 1)[1] if "." in entity_id else entity_id)
+
+            matched = False
+            if object_id and object_id in lowered:
+                matched = True
+            if friendly and friendly in lowered:
+                matched = True
+            if not matched:
+                continue
+
+            score = 8
+            if has_mode_scene_signal:
+                score += 2
+            scored_actions.append(
+                (
+                    score,
+                    {
+                        "service": "scene.turn_on",
+                        "target": {"entity_id": [entity_id], "area_id": [], "device_id": []},
+                        "service_data": {},
+                    },
+                )
+            )
+
+    if not scored_actions:
+        return {"actions": []}
+
+    scored_actions.sort(key=lambda x: x[0], reverse=True)
+    return {"actions": [scored_actions[0][1]]}
+
+
+def _read_entity_state(entity_id: str) -> str | None:
+    entity = str(entity_id or "").strip()
+    if not entity:
+        return None
+    try:
+        response = _ha_request("get", f"api/states/{entity}", timeout=8)
+        if response.status_code != 200:
+            return None
+        payload = response.json() or {}
+        if not isinstance(payload, dict):
+            return None
+        state = payload.get("state")
+        return str(state) if state is not None else None
+    except Exception:
+        return None
+
+
 def _handle_control_intent(text: str, route: dict, states: list[dict]) -> str:
     services = discover_services()
     service_map = _build_service_map(services)
@@ -602,8 +1432,12 @@ def _handle_control_intent(text: str, route: dict, states: list[dict]) -> str:
     logger.info("Intent slots (control): %s", json.dumps(intent_slots, ensure_ascii=False))
 
     plan = {"actions": []}
+
+    # Special-case mode/scene switching using dynamic HA entities/options.
+    plan = _plan_mode_or_scene_action(text, states, service_map)
+
     slot_targets = _match_entities_by_slots(states, intent_slots.get("slots") or {}, limit=8)
-    if slot_targets:
+    if slot_targets and not plan.get("actions"):
         action_type = _detect_control_action_type(text)
         if action_type:
             grouped = {}
@@ -635,7 +1469,11 @@ def _handle_control_intent(text: str, route: dict, states: list[dict]) -> str:
     planned_actions = plan.get("actions", [])
     logger.info("LLM control plan actions: %s", json.dumps(planned_actions, ensure_ascii=False))
     if not isinstance(planned_actions, list) or not planned_actions:
-        return "I couldn't find a valid Home Assistant control action"
+        return _summarize_failure_with_llm(
+            user_text=text,
+            failure_code="control_no_valid_action",
+            technical_message="I couldn't find a valid Home Assistant control action",
+        )
 
     state_map = {item.get("entity_id"): item for item in states if isinstance(item, dict) and item.get("entity_id")}
     execution_results = []
@@ -720,6 +1558,22 @@ def _handle_control_intent(text: str, route: dict, states: list[dict]) -> str:
             call_payload = dict(payload)
             call_payload["entity_id"] = valid_entities
             ok, response_msg = _call_ha_service(service, call_payload)
+
+            # Post-check for deterministic set operations (e.g., input_select.select_option).
+            if ok and service == "input_select.select_option":
+                expected_option = str(service_data.get("option") or "").strip()
+                if expected_option:
+                    mismatch = []
+                    for entity_id in valid_entities:
+                        current_state = _read_entity_state(entity_id)
+                        if current_state is None or str(current_state).lower() != expected_option.lower():
+                            mismatch.append(entity_id)
+                    if mismatch:
+                        ok = False
+                        response_msg = (
+                            f"Post-check failed: expected option '{expected_option}' not reached for {', '.join(mismatch)}"
+                        )
+
             execution_results.append(
                 {
                     "service": service,
@@ -741,15 +1595,13 @@ def _handle_control_intent(text: str, route: dict, states: list[dict]) -> str:
             )
 
     if not execution_results:
-        return "No available target entities found in Home Assistant"
+        return _summarize_failure_with_llm(
+            user_text=text,
+            failure_code="control_no_available_target",
+            technical_message="No available target entities found in Home Assistant",
+        )
 
-    success_count = sum(1 for result in execution_results if result.get("ok"))
-    skipped_count = sum(len(result.get("skipped", [])) for result in execution_results)
-    if success_count > 0 and skipped_count == 0:
-        return "Okay, I've done that"
-    if success_count > 0:
-        return f"Done for available entities. Skipped {skipped_count} unavailable or missing entities."
-    return "I found target entities, but could not execute actions successfully"
+    return _summarize_control_result_with_llm(text, execution_results)
 
 
 def _handle_query_intent(text: str, route: dict, states: list[dict]) -> str:
@@ -810,7 +1662,12 @@ def _handle_query_intent(text: str, route: dict, states: list[dict]) -> str:
         )
 
     if not query_results:
-        return UNKNOWN_FROM_HA_REPLY
+        return _summarize_failure_with_llm(
+            user_text=text,
+            failure_code="query_no_results",
+            technical_message=UNKNOWN_FROM_HA_REPLY,
+            fallback_text=UNKNOWN_FROM_HA_REPLY,
+        )
 
     facts = _build_query_facts(query_results)
     summary = _naturalize_summary_with_llm(text, facts, query_results)
@@ -863,39 +1720,32 @@ def _naturalize_summary_with_llm(user_text: str, facts_json: str, query_results:
         return UNKNOWN_FROM_HA_REPLY
 
     lang = _detect_response_language(user_text)
-    if _is_chinese_output(lang):
-        language_hint = "请使用自然、口语化、简洁中文回答。"
-    else:
-        language_hint = "Respond in natural, concise spoken English."
-
-    target_language = "Chinese" if _is_chinese_output(lang) else "English"
     fallback_text = UNKNOWN_FROM_HA_REPLY if _is_chinese_output(lang) else "I don't know based on Home Assistant data."
 
-    prompt = (
-        "You are a voice assistant response generator for Home Assistant tool results.\n"
-        "STRICT RULES:\n"
-        f"1) Respond in natural spoken {target_language}.\n"
-        "2) Do NOT add any new facts, values, entities, or predictions.\n"
-        "3) Include all key facts from tool results that are relevant to the user question.\n"
-        "4) For each selected entity, prioritize: state + all scalar numeric/boolean attributes available in the JSON.\n"
-        "5) Convert raw keys into user-friendly wording, but do not change values.\n"
-        "6) Keep the answer concise (1-2 sentences when possible).\n"
-        "7) Output plain text only and never output empty text or ellipsis.\n"
-        "8) If facts are insufficient, return exactly the fallback text.\n"
-        f"Fallback text: {fallback_text}\n"
-        f"{language_hint}\n"
-        f"User question: {user_text}\n"
-        f"Tool results JSON (source of truth): {facts_json}\n"
-        f"Raw query results JSON: {json.dumps(query_results, ensure_ascii=False)}"
-    )
-
     logger.info("Naturalization input facts: %s", facts_json)
-    rewritten = (llm.generate_response(prompt, temperature=0.15, max_tokens=260, retry_on_empty=True) or "").strip()
+    rewritten = _rewrite_result_with_llm(
+        user_text=user_text,
+        result_payload={
+            "facts": json.loads(facts_json),
+            "raw_query_results": query_results,
+        },
+        task_name="query_result_naturalization",
+        instruction=(
+            "Include all key facts relevant to the user question. "
+            "For each selected entity, prioritize state and scalar numeric/boolean attributes. "
+            "Convert raw keys into user-friendly wording without changing values. "
+            "If facts are insufficient, return fallback text exactly."
+        ),
+        fallback_text=fallback_text,
+        temperature=0.15,
+        max_tokens=260,
+    )
     logger.info("Naturalization output summary: %s", rewritten)
     if rewritten and not _looks_like_unknown_answer(rewritten):
         return rewritten
 
     # Retry with a shorter, simpler instruction in case the model returned empty output.
+    target_language = "Chinese" if _is_chinese_output(lang) else "English"
     retry_prompt = (
         f"Answer in {target_language}. "
         "Use ONLY the JSON facts below. "
@@ -1032,6 +1882,101 @@ def _detect_response_language(user_text: str) -> str:
 def _is_chinese_output(lang: str | None = None) -> bool:
     lang = ((lang or OUTPUT_LANGUAGE) or "").lower()
     return lang.startswith("zh")
+
+
+def _rewrite_result_with_llm(
+    user_text: str,
+    result_payload,
+    task_name: str,
+    instruction: str,
+    fallback_text: str,
+    temperature: float = 0.1,
+    max_tokens: int = 200,
+) -> str:
+    """Unified multilingual post-processor for query/control/task results."""
+    lang = _detect_response_language(user_text)
+    target_language = "Chinese" if _is_chinese_output(lang) else "English"
+
+    try:
+        payload_json = json.dumps(result_payload, ensure_ascii=False)
+    except Exception:
+        payload_json = json.dumps({"value": str(result_payload)}, ensure_ascii=False)
+
+    prompt = (
+        "You are a concise voice assistant response writer.\n"
+        f"Task: {task_name}\n"
+        f"Respond in natural spoken {target_language}.\n"
+        "Use ONLY the result JSON facts. Do not add new facts.\n"
+        "Output plain text only (1-2 short sentences).\n"
+        f"Instruction: {instruction}\n"
+        f"Fallback text: {fallback_text}\n"
+        f"User request: {user_text}\n"
+        f"Result JSON: {payload_json}"
+    )
+    rewritten = (llm.generate_response(prompt, temperature=temperature, max_tokens=max_tokens, retry_on_empty=True) or "").strip()
+    return rewritten or fallback_text
+
+
+def _summarize_failure_with_llm(
+    user_text: str,
+    failure_code: str,
+    technical_message: str,
+    fallback_text: str | None = None,
+) -> str:
+    fallback = str(fallback_text or technical_message or "操作失败").strip()
+    return _rewrite_result_with_llm(
+        user_text=user_text,
+        result_payload={
+            "failure_code": failure_code,
+            "technical_message": technical_message,
+        },
+        task_name="failure_naturalization",
+        instruction=(
+            "Rewrite the failure in clear, user-friendly language. "
+            "Keep meaning consistent with technical_message."
+        ),
+        fallback_text=fallback,
+        temperature=0.1,
+        max_tokens=140,
+    )
+
+
+def _summarize_control_result_with_llm(user_text: str, execution_results: list[dict]) -> str:
+    success_count = sum(1 for result in execution_results if result.get("ok"))
+    skipped_count = sum(len(result.get("skipped", [])) for result in execution_results)
+
+    lang = _detect_response_language(user_text)
+    if _is_chinese_output(lang):
+        if success_count > 0 and skipped_count == 0:
+            fallback = "已完成控制操作。"
+        elif success_count > 0:
+            fallback = f"已完成可执行的控制操作，跳过了{skipped_count}个不可用或缺失实体。"
+        else:
+            fallback = "找到了目标实体，但执行控制操作失败。"
+    else:
+        if success_count > 0 and skipped_count == 0:
+            fallback = "Done."
+        elif success_count > 0:
+            fallback = f"Done for available entities. Skipped {skipped_count} unavailable or missing entities."
+        else:
+            fallback = "I found target entities, but could not execute actions successfully."
+
+    return _rewrite_result_with_llm(
+        user_text=user_text,
+        result_payload={
+            "success_count": success_count,
+            "skipped_count": skipped_count,
+            "execution_results": execution_results,
+        },
+        task_name="control_result_naturalization",
+        instruction=(
+            "Summarize execution result clearly. Mention whether operation succeeded fully, partially, or failed. "
+            "If partial, mention skipped entities count."
+        ),
+        fallback_text=fallback,
+        temperature=0.1,
+        max_tokens=150,
+    )
 
 
 def _plan_ha_actions_with_rules(text: str, entities: list[dict], services: list[dict]) -> dict:
@@ -1190,14 +2135,17 @@ def _route_with_llm(text: str) -> dict:
     prompt = (
         "You are a router for a voice assistant with optional Home Assistant integration.\n"
         "Return ONLY JSON with schema:\n"
-        "{\"ha_related\": bool, \"intent\": \"none|control|query\", \"answer\": string, "
+        "{\"ha_related\": bool, \"intent\": \"none|control|query|task_create|task_update|task_delete\", \"answer\": string, "
         "\"actions\": [{\"service\": \"domain.service\", \"target\": {\"entity_id\": [\"domain.name\"], \"area_id\": [], \"device_id\": []}, \"service_data\": {}}], "
         "\"query_entities\": [\"domain.name\"]}\n"
         "Rules:\n"
         "1) If user asks general knowledge/chitchat, set ha_related=false, intent=none, and provide answer.\n"
         "2) If user wants to control HA entities, set ha_related=true, intent=control.\n"
         "3) If user asks HA state from local entities, set ha_related=true, intent=query.\n"
-        "4) If unknown but likely non-HA, set ha_related=false.\n"
+        "4) If user asks to create scheduled automation/task/plan in Home Assistant, set ha_related=true, intent=task_create.\n"
+        "5) If user asks to modify an existing automation task, set ha_related=true, intent=task_update.\n"
+        "6) If user asks to delete/cancel/remove an existing automation task, set ha_related=true, intent=task_delete.\n"
+        "7) If unknown but likely non-HA, set ha_related=false.\n"
         f"{_area_context_instruction(text)}\n"
         f"User text: {text}"
     )
@@ -1290,10 +2238,18 @@ def _recognize_ha_intent_like_ha(text: str, route: dict) -> dict:
 
     routed_intent = str((route or {}).get("intent", "none")).strip().lower()
     routed_ha_related = bool((route or {}).get("ha_related", False))
-    if routed_intent in {"control", "query"} and (
+    if routed_intent in {"control", "query", "task_create", "task_update", "task_delete"} and (
         routed_ha_related or _has_home_context_signal(text)
     ):
         return {"matched": True, "intent": routed_intent, "reason": "router"}
+
+    # Safety fallback for task-management phrases when router is uncertain.
+    if _is_task_creation_request(text):
+        return {"matched": True, "intent": "task_create", "reason": "task_keyword_fallback"}
+    if _is_task_update_request(text):
+        return {"matched": True, "intent": "task_update", "reason": "task_keyword_fallback"}
+    if _is_task_delete_request(text):
+        return {"matched": True, "intent": "task_delete", "reason": "task_keyword_fallback"}
 
     return {"matched": False, "intent": "none", "reason": "no_intent_match"}
 

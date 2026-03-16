@@ -318,11 +318,13 @@ def _compile_condition(cond: dict):
         return out
 
     if cond_type == "time":
-        out = {"condition": "time"}
-        if "after" in cond:
-            out["after"] = cond.get("after")
-        if "before" in cond:
-            out["before"] = cond.get("before")
+        out: dict[str, object] = {"condition": "time"}
+        after = cond.get("after")
+        before = cond.get("before")
+        if after is not None:
+            out["after"] = str(after)
+        if before is not None:
+            out["before"] = str(before)
         return out
 
     return None

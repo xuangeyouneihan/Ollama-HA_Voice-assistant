@@ -150,6 +150,36 @@ async def simulate_preset(preset_id: str):
         "note": "Simulation mode only. No real service call was executed.",
     }
 
+
+@app.post("/ha-tasks/from-text")
+async def create_ha_task_from_text(payload: dict):
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    result = ha_client.create_ha_task_from_text(text)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "failed to create HA task")
+    return result
+
+
+@app.post("/ha-tasks/manage-from-text")
+async def manage_ha_task_from_text(payload: dict):
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    expected_operation = payload.get("expected_operation")
+    if expected_operation is not None:
+        expected_operation = str(expected_operation).strip().lower()
+        if expected_operation not in {"task_update", "task_delete"}:
+            raise HTTPException(status_code=400, detail="expected_operation must be task_update or task_delete")
+
+    result = ha_client.manage_ha_task_from_text(text, expected_operation=expected_operation)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "failed to manage HA task")
+    return result
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
