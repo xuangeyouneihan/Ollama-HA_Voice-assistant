@@ -113,6 +113,20 @@ DOMAIN_LOCALIZATION_ZH = {
     "vacuum": "扫地机器人",
 }
 
+DOMAIN_LOCALIZATION_EN = {
+    "weather": "weather",
+    "climate": "climate",
+    "light": "lights",
+    "switch": "switches",
+    "fan": "fans",
+    "cover": "covers",
+    "media_player": "media",
+    "sensor": "sensors",
+    "binary_sensor": "sensors",
+    "lock": "locks",
+    "vacuum": "vacuum",
+}
+
 CONTROL_KEYWORDS = {
     "打开", "开启", "关", "关闭", "关掉", "切换", "toggle", "turn on", "turn off",
     "open", "close", "start", "stop", "set", "调到", "设置", "调高", "调低",
@@ -825,6 +839,20 @@ def _export_compiled_ha_yaml(compiled: dict, preset_id: str) -> dict:
     }
 
 
+def _auto_apply_ha_task_changes() -> dict:
+    """Reload HA script/automation so task changes take effect automatically."""
+    steps = []
+    for service in ["script.reload", "automation.reload"]:
+        ok, message = _call_ha_service(service, {})
+        steps.append({"service": service, "ok": bool(ok), "message": str(message or "")})
+
+    ok_all = all(step.get("ok") for step in steps)
+    return {
+        "ok": ok_all,
+        "steps": steps,
+    }
+
+
 def create_ha_task_from_text(text: str) -> dict:
     user_text = str(text or "").strip()
     if not user_text:
@@ -863,11 +891,13 @@ def create_ha_task_from_text(text: str) -> dict:
             created = _preset_store.create_preset(planned_candidate)
             compiled = presets.compile_preset_to_ha(created)
             exported = _export_compiled_ha_yaml(compiled, created.get("id") or "unknown")
+            applied = _auto_apply_ha_task_changes()
             return {
                 "ok": True,
                 "preset": created,
                 "compiled": compiled,
                 "exported": exported,
+                "applied": applied,
             }
         except Exception as exc:
             last_error = str(exc)
@@ -1040,10 +1070,12 @@ def manage_ha_task_from_text(text: str, expected_operation: str | None = None) -
                     "operation": operation,
                     "target": target,
                 }
+            applied = _auto_apply_ha_task_changes()
             return {
                 "ok": True,
                 "operation": "delete",
                 "target": {"id": target_id, "name": target.get("name")},
+                "applied": applied,
             }
 
         if operation != "update":
@@ -1116,12 +1148,14 @@ def manage_ha_task_from_text(text: str, expected_operation: str | None = None) -
 
             compiled = presets.compile_preset_to_ha(updated)
             exported = _export_compiled_ha_yaml(compiled, updated.get("id") or target_id)
+            applied = _auto_apply_ha_task_changes()
             return {
                 "ok": True,
                 "operation": "update",
                 "preset": updated,
                 "compiled": compiled,
                 "exported": exported,
+                "applied": applied,
                 "changes": changes,
             }
         except Exception as exc:
@@ -1189,10 +1223,16 @@ def _summarize_task_management_with_llm(user_text: str, result: dict) -> str:
     op = str(result.get("operation") or "").lower()
     if op == "delete":
         target = result.get("target") or {}
+        applied = result.get("applied") or {}
+        auto_applied = bool(applied.get("ok", False))
         fallback_ok = (
-            f"已删除任务{target.get('name') or ''}，任务ID为{target.get('id') or 'unknown'}。"
+            f"已删除任务{target.get('name') or ''}，任务ID为{target.get('id') or 'unknown'}，"
+            f"{'并已自动在HA中生效' if auto_applied else '但HA自动生效失败，请在HA手动重载'}。"
             if _is_chinese_output(lang)
-            else f"Deleted task {target.get('name') or ''} with ID {target.get('id') or 'unknown'}."
+            else (
+                f"Deleted task {target.get('name') or ''} with ID {target.get('id') or 'unknown'}, "
+                f"and {'auto-applied in Home Assistant' if auto_applied else 'auto-apply failed; please reload in Home Assistant manually'}."
+            )
         )
         return _rewrite_result_with_llm(
             user_text=user_text,
@@ -1205,10 +1245,16 @@ def _summarize_task_management_with_llm(user_text: str, result: dict) -> str:
         )
 
     preset = result.get("preset") or {}
+    applied = result.get("applied") or {}
+    auto_applied = bool(applied.get("ok", False))
     fallback_ok = (
-        f"已更新任务{preset.get('name') or ''}，任务ID为{preset.get('id') or 'unknown'}，并重新导出了YAML。"
+        f"已更新任务{preset.get('name') or ''}，任务ID为{preset.get('id') or 'unknown'}，并重新导出了YAML，"
+        f"{'且已自动在HA中生效' if auto_applied else '但HA自动生效失败，请在HA手动重载'}。"
         if _is_chinese_output(lang)
-        else f"Updated task {preset.get('name') or ''} with ID {preset.get('id') or 'unknown'}, and re-exported YAML."
+        else (
+            f"Updated task {preset.get('name') or ''} with ID {preset.get('id') or 'unknown'}, re-exported YAML, "
+            f"and {'auto-applied in Home Assistant' if auto_applied else 'auto-apply failed; please reload in Home Assistant manually'}."
+        )
     )
     return _rewrite_result_with_llm(
         user_text=user_text,
@@ -1246,7 +1292,9 @@ def _summarize_task_creation_with_llm(user_text: str, task_result: dict) -> str:
     created = task_result.get("preset") or {}
     compiled = task_result.get("compiled") or {}
     exported = task_result.get("exported") or {}
+    applied = task_result.get("applied") or {}
     has_automation = bool(compiled.get("automation"))
+    auto_applied = bool(applied.get("ok", False))
 
     summary_payload = {
         "preset_name": created.get("name") or "",
@@ -1255,17 +1303,19 @@ def _summarize_task_creation_with_llm(user_text: str, task_result: dict) -> str:
         "has_automation": has_automation,
         "script_yaml_path": exported.get("script_yaml_path"),
         "automation_yaml_path": exported.get("automation_yaml_path"),
+        "auto_applied": auto_applied,
+        "apply_result": applied,
     }
 
     fallback_ok = (
         f"已创建计划任务{summary_payload.get('preset_name') or '未命名任务'}，"
-        f"任务ID为{summary_payload.get('preset_id') or 'unknown'}。"
-        "请将导出的YAML合并到Home Assistant后重载automation与script。"
+        f"任务ID为{summary_payload.get('preset_id') or 'unknown'}，"
+        f"{'并已自动在HA中生效' if auto_applied else '但HA自动生效失败，请将导出的YAML合并后在HA手动重载automation与script'}。"
         if _is_chinese_output(lang)
         else (
             f"Created automation task {summary_payload.get('preset_name') or 'unnamed task'} "
-            f"with ID {summary_payload.get('preset_id') or 'unknown'}. "
-            "Merge the exported YAML into Home Assistant and reload automation and script."
+            f"with ID {summary_payload.get('preset_id') or 'unknown'}, "
+            f"and {'auto-applied in Home Assistant' if auto_applied else 'auto-apply failed; merge exported YAML and reload automation/script manually'}."
         )
     )
 
@@ -1276,7 +1326,8 @@ def _summarize_task_creation_with_llm(user_text: str, task_result: dict) -> str:
         instruction=(
             "Mention task name and task ID. "
             "If has_automation is true, say it is scheduled/automated and mention YAML export files. "
-            "If has_automation is false, say it is manual trigger and suggest adding time/condition."
+            "If has_automation is false, say it is manual trigger and suggest adding time/condition. "
+            "Also mention whether auto-apply succeeded based on auto_applied/apply_result."
         ),
         fallback_text=fallback_ok,
         temperature=0.1,
@@ -1669,7 +1720,8 @@ def _handle_query_intent(text: str, route: dict, states: list[dict]) -> str:
             fallback_text=UNKNOWN_FROM_HA_REPLY,
         )
 
-    facts = _build_query_facts(query_results)
+    lang = _detect_response_language(text)
+    facts = _build_query_facts(query_results, lang)
     summary = _naturalize_summary_with_llm(text, facts, query_results)
     if missing:
         return f"{summary} (Missing entities: {', '.join(missing)})"
@@ -1697,16 +1749,49 @@ def _extract_compact_attributes(attrs: dict, max_items: int = 4) -> dict:
     return out
 
 
-def _build_query_facts(query_results: list[dict]) -> str:
+def _display_name_for_naturalization(entity_id: object | None, friendly_name: object | None, lang: str) -> str:
+    friendly = str(friendly_name or "").strip()
+    entity = str(entity_id or "").strip()
+    domain = entity.split(".", 1)[0] if entity else ""
+    if not friendly:
+        if _is_chinese_output(lang):
+            return DOMAIN_LOCALIZATION_ZH.get(domain, "")
+        return DOMAIN_LOCALIZATION_EN.get(domain, "")
+
+    object_id = entity.split(".", 1)[1] if "." in entity else entity
+    object_tokens = set(re.findall(r"[a-z0-9]+", object_id.lower()))
+    friendly_tokens = set(re.findall(r"[a-z0-9]+", friendly.lower()))
+
+    looks_ascii = bool(re.fullmatch(r"[A-Za-z0-9 _.-]+", friendly))
+    token_overlap = bool(object_tokens and friendly_tokens and object_tokens.issubset(friendly_tokens))
+    generic_tokens = {"home", "default", "forecast", "local", "assistant"}
+    generic_hit = bool(friendly_tokens & generic_tokens)
+    looks_internal = looks_ascii and (token_overlap or generic_hit)
+
+    # Hide likely internal source names like "Forecast Home" for both zh/en output.
+    if looks_internal:
+        if _is_chinese_output(lang):
+            return DOMAIN_LOCALIZATION_ZH.get(domain, "")
+        return DOMAIN_LOCALIZATION_EN.get(domain, "")
+
+    return friendly
+
+
+def _build_query_facts(query_results: list[dict], lang: str) -> str:
     if not query_results:
         return ""
 
     compact = []
     for item in query_results:
+        entity_id = item.get("entity_id")
+        display_name = _display_name_for_naturalization(
+            entity_id=entity_id,
+            friendly_name=item.get("friendly_name"),
+            lang=lang,
+        )
         compact.append(
             {
-                "entity_id": item.get("entity_id"),
-                "friendly_name": item.get("friendly_name") or item.get("entity_id"),
+                "friendly_name": display_name,
                 "state": item.get("state"),
                 "unit": item.get("unit"),
                 "attributes": item.get("attributes") or {},
@@ -1734,6 +1819,7 @@ def _naturalize_summary_with_llm(user_text: str, facts_json: str, query_results:
             "Include all key facts relevant to the user question. "
             "For each selected entity, prioritize state and scalar numeric/boolean attributes. "
             "Convert raw keys into user-friendly wording without changing values. "
+            "Do not mention internal source names (entity_id/friendly_name) unless the user explicitly asks for which device/source. "
             "If facts are insufficient, return fallback text exactly."
         ),
         fallback_text=fallback_text,
@@ -1793,14 +1879,25 @@ def _fallback_natural_from_facts(query_results: list[dict], lang: str) -> str:
     def _humanize_entity_name(item: dict) -> str:
         friendly = str(item.get("friendly_name") or "").strip()
         entity_id = str(item.get("entity_id") or "").strip()
+        domain = entity_id.split(".", 1)[0] if entity_id else ""
         if friendly:
-            if _is_chinese_output(lang) and re.fullmatch(r"[A-Za-z0-9 _.-]+", friendly):
-                domain = entity_id.split(".", 1)[0] if entity_id else ""
-                return DOMAIN_LOCALIZATION_ZH.get(domain, friendly)
+            object_id = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+            object_tokens = set(re.findall(r"[a-z0-9]+", object_id.lower()))
+            friendly_tokens = set(re.findall(r"[a-z0-9]+", friendly.lower()))
+            looks_ascii = bool(re.fullmatch(r"[A-Za-z0-9 _.-]+", friendly))
+            token_overlap = bool(object_tokens and friendly_tokens and object_tokens.issubset(friendly_tokens))
+            generic_hit = bool(friendly_tokens & {"home", "default", "forecast", "local", "assistant"})
+            looks_internal = looks_ascii and (token_overlap or generic_hit)
+
+            if looks_internal:
+                if _is_chinese_output(lang):
+                    return DOMAIN_LOCALIZATION_ZH.get(domain, friendly)
+                return DOMAIN_LOCALIZATION_EN.get(domain, friendly)
             return friendly
         if entity_id and _is_chinese_output(lang):
-            domain = entity_id.split(".", 1)[0]
             return DOMAIN_LOCALIZATION_ZH.get(domain, entity_id)
+        if entity_id:
+            return DOMAIN_LOCALIZATION_EN.get(domain, entity_id)
         return entity_id or ("未知实体" if _is_chinese_output(lang) else "unknown entity")
 
     def _humanize_state(val):

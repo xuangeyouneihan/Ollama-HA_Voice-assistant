@@ -29,8 +29,9 @@ tts:
 
 llm:
   engine: ollama
-  model: qwen3:14b
+  model: qwen3.5:9b
   host: http://localhost:11434
+  thinking: false
   temperature: 0.6
   max_tokens: 500
   timeout: 120

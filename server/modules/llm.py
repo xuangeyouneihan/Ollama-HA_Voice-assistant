@@ -23,6 +23,7 @@ SYSTEM_PROMPT = llm_cfg.get(
 )
 TEMPERATURE = llm_cfg.get("temperature", 0.7)
 MAX_TOKENS = llm_cfg.get("max_tokens", 500)
+THINKING = bool(llm_cfg.get("thinking", False))
 
 def generate_response(prompt, temperature=None, max_tokens=None, retry_on_empty=True):
     """
@@ -59,6 +60,7 @@ def generate_response(prompt, temperature=None, max_tokens=None, retry_on_empty=
                 "system": SYSTEM_PROMPT,
                 "prompt": current_prompt,
                 "stream": False,
+                "think": THINKING,
                 "options": {
                     "temperature": current_temperature,
                     "num_predict": use_max_tokens,
@@ -75,10 +77,14 @@ def generate_response(prompt, temperature=None, max_tokens=None, retry_on_empty=
 
             result = response.json()
             response_text = (result.get("response") or "").strip()
+            thinking_text = (result.get("thinking") or "").strip()
             logger.info(f"LLM generated response: {response_text[:100]}...")
 
             if response_text and response_text not in {"...", "…"}:
                 return response_text
+
+            if thinking_text:
+                logger.warning("LLM returned empty response with non-empty thinking field; likely thinking-mode output")
 
             if attempt < max_attempts - 1:
                 logger.warning("LLM returned empty response, retrying once with stricter instruction")

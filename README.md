@@ -23,16 +23,13 @@ You can build and test automation presets before smart devices are ready.
 
 ### API endpoints
 
-- `GET /presets`
-- `GET /presets/{preset_id}`
-- `POST /presets`
-- `PUT /presets/{preset_id}`
-- `DELETE /presets/{preset_id}`
-- `POST /presets/{preset_id}/simulate`
-- `POST /presets/{preset_id}/compile-ha`
-- `POST /ha-tasks/from-text` (自然语言直接生成HA计划任务)
+### Auto apply after task change
 
-- `POST /ha-tasks/manage-from-text` (自然语言修改/删除已有HA任务)
+- 创建/修改/删除任务后，服务会自动尝试调用：
+  - `script.reload`
+  - `automation.reload`
+- 返回结果中的 `applied` 字段会给出自动生效是否成功。
+- 如果自动生效失败，语音回复会提示你在 HA 手动重载。
 
 ### One sentence to create HA automation
 
