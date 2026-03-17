@@ -7,3 +7,4 @@ python-multipart<0.1
 wyoming>=1.0,<2
 sounddevice<1
 numpy>=2.0,<3
+miniaudio>=1.61,<2

@@ -7,6 +7,7 @@
 import logging
 import os
 import wave
+import asyncio
 import numpy as np
 import sounddevice as sd
 
@@ -22,6 +23,7 @@ cfg = get_config()
 
 audio_cfg = cfg.get("audio", {}) if cfg else {}
 tts_cfg = cfg.get("tts", {}) if cfg else {}
+ha_cfg = cfg.get("home_assistant", {}) if cfg else {}
 
 SAMPLE_RATE = int(audio_cfg.get("sample_rate", 16000))
 INPUT_CHANNELS = int(audio_cfg.get("input_channels", audio_cfg.get("channels", 1)))
@@ -42,6 +44,7 @@ SILENCE_MAX_HEAD_TRIM_MS = int(audio_cfg.get("silence_max_head_trim_ms", 300))
 DEBUG_SAVE_WAV = bool(audio_cfg.get("debug_save_wav", False))
 DEBUG_WAV_PATH = str(audio_cfg.get("debug_wav_path", "server/debug_last_record.wav"))
 MONITOR_INPUT = bool(audio_cfg.get("monitor_input", False))
+ASSIST_AUDIO_MODE = bool(ha_cfg.get("assist_audio_mode", False))
 
 
 def _describe_device(device, kind: str):
@@ -274,6 +277,32 @@ def handle_once():
             sample_width=SAMPLE_WIDTH,
             channels=INPUT_CHANNELS,
         )
+
+    if ASSIST_AUDIO_MODE:
+        result = asyncio.run(
+            ha_client.process_audio_with_assist_pipeline(
+                audio_bytes,
+                sample_rate=SAMPLE_RATE,
+            )
+        )
+        transcript = str(result.get("transcript") or "").strip()
+        if transcript:
+            print(f"识别: {transcript}")
+
+        reply = str(result.get("response_text") or "").strip()
+        if reply:
+            print(f"回复: {reply}")
+
+        tts_audio = result.get("tts_audio") or b""
+        tts_rate = int(result.get("tts_sample_rate") or 0)
+        tts_width = int(result.get("tts_sample_width") or 0)
+        tts_channels = int(result.get("tts_channels") or 0)
+        if tts_audio and tts_rate > 0 and tts_width > 0 and tts_channels > 0:
+            play_audio(tts_audio, tts_rate, tts_width, tts_channels)
+            return
+
+        print("HA Assist TTS 音频不可播放（可能不是 WAV/PCM），暂不播放")
+        return
 
     text = stt.transcribe(
         audio_bytes,
