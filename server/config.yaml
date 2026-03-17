@@ -44,17 +44,15 @@ home_assistant:
   enabled: true
   url: http://homeassistant.local:8123
   # Set to true to bypass local STT/LLM/TTS and forward raw audio to HA Assist pipeline.
-  assist_audio_mode: false
+  assist_audio_mode: true
   # Optional pipeline id. Leave empty to use HA default Assist pipeline.
   assist_pipeline_id: ""
-  # Input sample rate sent to HA Assist (should match device capture rate).
-  assist_audio_sample_rate: 16000
   # Timeout for HA Assist websocket run.
   assist_audio_timeout_s: 45
   auto_discover: true
 
 audio:
-  sample_rate: 48000
+  sample_rate: 44100
   input_channels: 1
   output_channels: 2
   input_device: 6

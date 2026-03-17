@@ -285,6 +285,11 @@ def handle_once():
                 sample_rate=SAMPLE_RATE,
             )
         )
+        if not bool(result.get("ok", False)):
+            message = str(result.get("message") or "assist pipeline request failed")
+            print(f"HA Assist 失败: {message}")
+            return
+
         transcript = str(result.get("transcript") or "").strip()
         if transcript:
             print(f"识别: {transcript}")

@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="HumbleVoice Server")
 preset_store = presets.build_store_from_config()
 cfg = get_config()
+audio_cfg = cfg.get("audio", {}) if cfg else {}
 ha_cfg = cfg.get("home_assistant", {}) if cfg else {}
 ASSIST_AUDIO_MODE = bool(ha_cfg.get("assist_audio_mode", False))
-ASSIST_AUDIO_SAMPLE_RATE = int(ha_cfg.get("assist_audio_sample_rate", 16000))
+ASSIST_INPUT_SAMPLE_RATE = int(audio_cfg.get("sample_rate", 16000))
 
 # CORS middleware for development
 app.add_middleware(
@@ -45,8 +46,14 @@ async def audio_endpoint(websocket: WebSocket):
                 logger.info("Assist audio mode enabled: forwarding raw audio to Home Assistant Assist pipeline")
                 assist_result = await ha_client.process_audio_with_assist_pipeline(
                     audio_data,
-                    sample_rate=ASSIST_AUDIO_SAMPLE_RATE,
+                    sample_rate=ASSIST_INPUT_SAMPLE_RATE,
                 )
+                if not bool(assist_result.get("ok", False)):
+                    message = str(assist_result.get("message") or "assist pipeline request failed")
+                    logger.error(f"Assist request failed: {message}")
+                    await websocket.send_text("Assist request failed")
+                    continue
+
                 transcript = str(assist_result.get("transcript") or "").strip()
                 if transcript:
                     logger.info(f"Assist transcript: {transcript}")

@@ -10,20 +10,20 @@ import os
 import io
 import wave
 import asyncio
+import socket
+import numpy as np
 import yaml
 from urllib.parse import urlparse, urlunparse
 import websockets
 from config_loader import get_config
 from modules import llm, presets
 
-try:
-    import miniaudio
-except Exception:  # Optional dependency for mp3/ogg decode
-    miniaudio = None
+import av
 
 logger = logging.getLogger(__name__)
 
 cfg = get_config()
+audio_cfg = cfg.get("audio", {}) if cfg else {}
 ha_cfg = cfg.get("home_assistant", {}) if cfg else {}
 HA_URL = ha_cfg.get("url", "http://homeassistant.local:8123")
 HA_TOKEN = ha_cfg.get("token", "YOUR_HA_TOKEN")
@@ -32,7 +32,7 @@ AREA_ALIASES_CFG = ha_cfg.get("area_aliases") or {}
 OUTPUT_LANGUAGE = str(ha_cfg.get("response_language", "zh-CN")).strip()
 ASSIST_AUDIO_MODE = bool(ha_cfg.get("assist_audio_mode", False))
 ASSIST_PIPELINE_ID = str(ha_cfg.get("assist_pipeline_id", "")).strip()
-ASSIST_AUDIO_SAMPLE_RATE = int(ha_cfg.get("assist_audio_sample_rate", 16000))
+ASSIST_INPUT_SAMPLE_RATE = int(audio_cfg.get("sample_rate", 16000))
 ASSIST_AUDIO_TIMEOUT_S = float(ha_cfg.get("assist_audio_timeout_s", 45))
 
 headers = {
@@ -587,6 +587,19 @@ def use_assist_audio_mode() -> bool:
     return ASSIST_AUDIO_MODE
 
 
+def _is_name_resolution_error(exc: Exception) -> bool:
+    if isinstance(exc, socket.gaierror):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == -2:
+        return True
+    message = str(exc).lower()
+    return (
+        "name or service not known" in message
+        or "failed to resolve" in message
+        or "name resolution" in message
+    )
+
+
 def _build_ws_url(base_http_url: str) -> str:
     parsed = urlparse((base_http_url or "").rstrip("/"))
     if not parsed.netloc:
@@ -675,8 +688,22 @@ def _looks_like_ogg(audio_bytes: bytes) -> bool:
     return bool(audio_bytes and audio_bytes.startswith(b"OggS"))
 
 
+def _layout_channel_count(layout_obj) -> int:
+    if layout_obj is None:
+        return 0
+    channels_obj = getattr(layout_obj, "channels", None)
+    if isinstance(channels_obj, int):
+        return channels_obj
+    if isinstance(channels_obj, (list, tuple)):
+        return len(channels_obj)
+    try:
+        return int(channels_obj or 0)
+    except Exception:
+        return 0
+
+
 def _decode_compressed_audio_if_possible(audio_bytes: bytes, mime_type: str = "") -> tuple[bytes, int, int, int] | None:
-    if not audio_bytes or miniaudio is None:
+    if not audio_bytes:
         return None
 
     lower_mime = str(mime_type or "").lower()
@@ -692,24 +719,90 @@ def _decode_compressed_audio_if_possible(audio_bytes: bytes, mime_type: str = ""
         return None
 
     try:
-        decoded = miniaudio.decode(
-            audio_bytes,
-            output_format=miniaudio.SampleFormat.SIGNED16,
-        )
-        samples = decoded.samples
-        if hasattr(samples, "tobytes"):
-            pcm = samples.tobytes()
-        elif isinstance(samples, (bytes, bytearray, memoryview)):
-            pcm = bytes(samples)
-        else:
-            pcm = bytes(samples)
+        with av.open(io.BytesIO(audio_bytes), mode="r") as container:
+            stream = next((s for s in container.streams if s.type == "audio"), None)
+            if stream is None:
+                return None
 
-        channels = int(getattr(decoded, "nchannels", 2) or 2)
-        sample_rate = int(getattr(decoded, "sample_rate", 44100) or 44100)
+            pcm_chunks = []
+            sample_rate = int(getattr(stream, "rate", 0) or 0)
+            channels = 0
+            resampler = None
+
+            for frame in container.decode(stream):
+                frame_rate = int(getattr(frame, "sample_rate", 0) or sample_rate or 44100)
+                if frame_rate <= 0:
+                    frame_rate = 44100
+
+                frame_channels = _layout_channel_count(getattr(frame, "layout", None))
+                if frame_channels <= 0:
+                    frame_channels = _layout_channel_count(getattr(stream, "layout", None)) or 2
+
+                target_layout = "mono" if frame_channels == 1 else "stereo"
+                resampler = av.audio.resampler.AudioResampler(
+                    format="s16",
+                    layout=target_layout,
+                    rate=frame_rate,
+                )
+
+                resampled = resampler.resample(frame)
+                if resampled is None:
+                    continue
+                if not isinstance(resampled, list):
+                    resampled = [resampled]
+
+                for out in resampled:
+                    arr = out.to_ndarray()
+                    if arr is None:
+                        continue
+
+                    out_channels = _layout_channel_count(getattr(out, "layout", None)) or frame_channels
+                    if out_channels <= 0:
+                        out_channels = 2
+
+                    if arr.dtype != np.int16:
+                        if np.issubdtype(arr.dtype, np.floating):
+                            arr = np.clip(arr, -1.0, 1.0)
+                            arr = (arr * 32767.0).astype(np.int16)
+                        else:
+                            arr = arr.astype(np.int16)
+
+                    if arr.ndim == 1:
+                        channels = out_channels
+                        pcm_chunks.append(arr.reshape(-1).astype(np.int16, copy=False).tobytes())
+                        sample_rate = int(getattr(out, "sample_rate", 0) or frame_rate)
+                        continue
+
+                    if arr.ndim == 2 and arr.shape[0] == 1 and out_channels > 1:
+                        channels = out_channels
+                        pcm_chunks.append(arr.reshape(-1).astype(np.int16, copy=False).tobytes())
+                        sample_rate = int(getattr(out, "sample_rate", 0) or frame_rate)
+                        continue
+
+                    if arr.ndim == 2:
+                        channels = out_channels if out_channels > 0 else int(arr.shape[0])
+                        # Convert shape (channels, samples) -> interleaved int16 bytes.
+                        pcm_chunks.append(arr.T.astype(np.int16, copy=False).tobytes())
+                        sample_rate = int(getattr(out, "sample_rate", 0) or frame_rate)
+                        continue
+
+                    channels = out_channels
+                    pcm_chunks.append(arr.reshape(-1).astype(np.int16, copy=False).tobytes())
+                    sample_rate = int(getattr(out, "sample_rate", 0) or frame_rate)
+
+            if not pcm_chunks:
+                return None
+
+            pcm = b"".join(pcm_chunks)
+            if sample_rate <= 0:
+                sample_rate = 44100
+            if channels <= 0:
+                channels = 2
+
         sample_width = 2
         return pcm, sample_rate, sample_width, channels
     except Exception as exc:
-        logger.warning("Failed to decode compressed TTS audio with miniaudio: %s", exc)
+        logger.warning("Failed to decode compressed TTS audio with PyAV: %s", exc)
         return None
 
 
@@ -723,13 +816,22 @@ def _decode_tts_audio_if_possible(audio_bytes: bytes, mime_type: str = "") -> tu
 def _download_tts_audio(url: str, timeout: int = 20) -> tuple[bytes, str]:
     last_error = None
     auth_headers = {"Authorization": f"Bearer {HA_TOKEN}"}
-    for candidate in _build_candidate_tts_urls(url):
+    candidates = _build_candidate_tts_urls(url)
+    for idx, candidate in enumerate(candidates):
         try:
             resp = requests.get(candidate, headers=auth_headers, timeout=timeout)
             resp.raise_for_status()
+            if idx > 0:
+                logger.warning("HA TTS download fallback succeeded via %s", candidate)
             return resp.content, str(resp.headers.get("Content-Type", "")).strip()
         except requests.RequestException as exc:
             last_error = exc
+            if idx == 0 and _is_name_resolution_error(exc) and len(candidates) > 1:
+                logger.warning(
+                    "HA TTS primary host resolve failed via %s, trying fallbacks: %s",
+                    candidate,
+                    ", ".join(candidates[1:]),
+                )
             logger.warning("Failed to download HA TTS audio via %s: %s", candidate, exc)
     raise last_error if last_error else RuntimeError("failed to download HA TTS audio")
 
@@ -750,7 +852,7 @@ async def process_audio_with_assist_pipeline(audio_data: bytes, sample_rate: int
         "start_stage": "stt",
         "end_stage": "tts",
         "input": {
-            "sample_rate": int(sample_rate if sample_rate is not None else ASSIST_AUDIO_SAMPLE_RATE),
+            "sample_rate": int(sample_rate if sample_rate is not None else ASSIST_INPUT_SAMPLE_RATE),
         },
     }
     if ASSIST_PIPELINE_ID:
@@ -761,14 +863,32 @@ async def process_audio_with_assist_pipeline(audio_data: bytes, sample_rate: int
     response_text = ""
     tts_url = ""
     tts_mime_type = ""
-    stt_handler_id = None
-    stt_started = False
-    audio_sent = False
+    run_success = False
     last_error = None
 
-    for base in _candidate_ha_base_urls():
+    candidate_bases = _candidate_ha_base_urls()
+    candidate_ws_urls = []
+    for _base in candidate_bases:
+        try:
+            candidate_ws_urls.append(_build_ws_url(_base))
+        except Exception:
+            continue
+
+    for idx, base in enumerate(candidate_bases):
         ws_url = _build_ws_url(base)
         try:
+            if idx > 0:
+                logger.warning("Assist pipeline fallback attempt via %s", ws_url)
+
+            attempt_transcript = ""
+            attempt_response_text = ""
+            attempt_tts_url = ""
+            attempt_tts_mime_type = ""
+            stt_handler_id = None
+            stt_started = False
+            audio_sent = False
+            saw_run_end = False
+
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20, max_size=8 * 1024 * 1024) as ws:
                 auth_required = await asyncio.wait_for(ws.recv(), timeout=10)
                 auth_required_msg = json.loads(auth_required)
@@ -808,24 +928,24 @@ async def process_audio_with_assist_pipeline(audio_data: bytes, sample_rate: int
                         if stt_handler_id is None:
                             stt_handler_id = runner_data.get("stt_binary_handler_id")
                         tts_output = data.get("tts_output") or {}
-                        if not tts_url:
-                            tts_url = str(tts_output.get("url") or "").strip()
-                        if not tts_mime_type:
-                            tts_mime_type = str(tts_output.get("mime_type") or "").strip()
+                        if not attempt_tts_url:
+                            attempt_tts_url = str(tts_output.get("url") or "").strip()
+                        if not attempt_tts_mime_type:
+                            attempt_tts_mime_type = str(tts_output.get("mime_type") or "").strip()
 
                     elif event_type == "stt-start":
                         stt_started = True
 
                     elif event_type == "stt-end":
                         stt_output = data.get("stt_output") or {}
-                        transcript = str(stt_output.get("text") or "").strip()
+                        attempt_transcript = str(stt_output.get("text") or "").strip()
 
                     elif event_type == "intent-end":
-                        response_text = _extract_speech_text(data.get("intent_output"))
+                        attempt_response_text = _extract_speech_text(data.get("intent_output"))
 
                     elif event_type == "tts-end":
-                        tts_url = str(data.get("url") or tts_url or "").strip()
-                        tts_mime_type = str(data.get("mime_type") or tts_mime_type or "").strip()
+                        attempt_tts_url = str(data.get("url") or attempt_tts_url or "").strip()
+                        attempt_tts_mime_type = str(data.get("mime_type") or attempt_tts_mime_type or "").strip()
 
                     elif event_type == "error":
                         code = str(data.get("code") or "unknown")
@@ -833,6 +953,7 @@ async def process_audio_with_assist_pipeline(audio_data: bytes, sample_rate: int
                         raise RuntimeError(f"assist pipeline error [{code}]: {message}")
 
                     elif event_type == "run-end":
+                        saw_run_end = True
                         break
 
                     if stt_started and stt_handler_id is not None and not audio_sent:
@@ -843,15 +964,31 @@ async def process_audio_with_assist_pipeline(audio_data: bytes, sample_rate: int
                         await ws.send(handler_byte)
                         audio_sent = True
 
+                if not saw_run_end:
+                    raise RuntimeError("assist pipeline did not complete with run-end")
+
+                transcript = attempt_transcript
+                response_text = attempt_response_text
+                tts_url = attempt_tts_url
+                tts_mime_type = attempt_tts_mime_type
+                if idx > 0:
+                    logger.warning("Assist pipeline fallback succeeded via %s", ws_url)
+                run_success = True
                 break
         except Exception as exc:
             last_error = exc
+            if idx == 0 and _is_name_resolution_error(exc) and len(candidate_ws_urls) > 1:
+                logger.warning(
+                    "Assist pipeline primary host resolve failed via %s, trying fallbacks: %s",
+                    ws_url,
+                    ", ".join(candidate_ws_urls[1:]),
+                )
             logger.warning("Assist pipeline attempt failed via %s: %s", ws_url, exc)
 
-    if last_error and (not transcript and not response_text and not tts_url):
+    if not run_success:
         return {
             "ok": False,
-            "message": f"assist pipeline request failed: {last_error}",
+            "message": f"assist pipeline request failed: {last_error or 'unknown error'}",
             "transcript": "",
             "response_text": "",
             "tts_audio": b"",
