@@ -1,0 +1,55 @@
+# intent_script template for Home Assistant
+#
+# This file is a template snippet.
+# Copy the `intent_script` section into your Home Assistant configuration.yaml,
+# then adjust rest_command names/URLs as needed.
+#
+# Expected intent names (from custom intents):
+# - HVCreateAutomation
+# - HVUpdateAutomation
+# - HVDeleteAutomation
+
+intent_script:
+  HVCreateAutomation:
+    speech:
+      text: "Okay, I will create that automation."
+    action:
+      - service: rest_command.hv_task_create
+        data:
+          text: "{{ text }}"
+
+  HVUpdateAutomation:
+    speech:
+      text: "Okay, I will update that automation."
+    action:
+      - service: rest_command.hv_task_manage_update
+        data:
+          text: "{{ text }}"
+
+  HVDeleteAutomation:
+    speech:
+      text: "Okay, I will delete that automation."
+    action:
+      - service: rest_command.hv_task_manage_delete
+        data:
+          text: "{{ text }}"
+
+# Optional: matching rest_command template (put in configuration.yaml)
+# rest_command:
+#   hv_task_create:
+#     url: "http://<SERVER_IP>:8000/ha-tasks/from-text"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"text": "{{ text }}"}'
+#
+#   hv_task_manage_update:
+#     url: "http://<SERVER_IP>:8000/ha-tasks/manage-from-text"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"text": "{{ text }}", "expected_operation": "task_update"}'
+#
+#   hv_task_manage_delete:
+#     url: "http://<SERVER_IP>:8000/ha-tasks/manage-from-text"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"text": "{{ text }}", "expected_operation": "task_delete"}'

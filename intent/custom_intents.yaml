@@ -1,0 +1,46 @@
+# Custom intents scaffold for Home Assistant
+#
+# Purpose:
+# - Keep a starter place for user-defined intents.
+# - Map natural language to intent names, then handle them in intent_script.
+#
+# Usage:
+# 1) Keep this file in your HA custom sentence path (or copy it there).
+# 2) Add matching handlers in configuration.yaml -> intent_script.
+# 3) Reload Assist/sentence configuration after edits.
+#
+# Note:
+# - Chinese templates are provided in intent/custom_intents_zh.yaml.
+
+language: "en"
+intents:
+  HVCreateAutomation:
+    data:
+      - sentences:
+          - "create an automation {text}"
+          - "help me create an automation {text}"
+
+  HVUpdateAutomation:
+    data:
+      - sentences:
+          - "update automation {text}"
+          - "modify automation {text}"
+
+  HVDeleteAutomation:
+    data:
+      - sentences:
+          - "delete automation {text}"
+          - "remove automation {text}"
+
+lists:
+  # Example list placeholder (optional)
+  # mode_name:
+  #   values:
+  #     - in: "home"
+  #       out: "home"
+  #     - in: "away"
+  #       out: "away"
+
+expansion_rules:
+  # Example expansion placeholder (optional)
+  # automation_verb: "create|update|delete"
