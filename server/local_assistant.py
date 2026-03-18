@@ -8,6 +8,7 @@ import logging
 import os
 import wave
 import asyncio
+import time
 import numpy as np
 import sounddevice as sd
 
@@ -31,6 +32,7 @@ OUTPUT_CHANNELS = int(audio_cfg.get("output_channels", audio_cfg.get("channels",
 INPUT_DEVICE = audio_cfg.get("input_device") if audio_cfg.get("input_device") is not None else None
 OUTPUT_DEVICE = audio_cfg.get("output_device") if audio_cfg.get("output_device") is not None else None
 BUFFER_SIZE = int(audio_cfg.get("buffer_size", 2048))
+OVERFLOW_GRACE_MS = int(audio_cfg.get("overflow_grace_ms", 300))
 SAMPLE_WIDTH = int(audio_cfg.get("sample_width", 2))
 START_DROP_MS = int(audio_cfg.get("start_drop_ms", 0))
 INPUT_GAIN = float(audio_cfg.get("input_gain", 1.8))
@@ -178,13 +180,19 @@ def record_once() -> bytes:
     """按回车开始录音，再次按回车结束，返回原始PCM字节。"""
     frames = []
     overflow_count = 0
+    other_status_count = 0
+    stream_start_ts = 0.0
 
     def callback(indata, frames_count, time_info, status):
-        nonlocal overflow_count
+        nonlocal overflow_count, other_status_count, stream_start_ts
         if status:
-            logger.warning(f"录音状态: {status}")
             if getattr(status, "input_overflow", False):
-                overflow_count += 1
+                # Stream startup can report transient overflow on some backends.
+                # Ignore a short warm-up window to reduce false-positive warnings.
+                if stream_start_ts <= 0 or (time.monotonic() - stream_start_ts) * 1000 >= OVERFLOW_GRACE_MS:
+                    overflow_count += 1
+            if not getattr(status, "input_overflow", False):
+                other_status_count += 1
         frames.append(indata.copy())
 
     input("按回车开始录音...")
@@ -194,7 +202,7 @@ def record_once() -> bytes:
         INPUT_DEVICE,
         SAMPLE_RATE,
         INPUT_CHANNELS,
-        BUFFER_SIZE,
+        BUFFER_SIZE if BUFFER_SIZE > 0 else "auto(0)",
     )
     sd.check_input_settings(
         device=INPUT_DEVICE,
@@ -207,14 +215,21 @@ def record_once() -> bytes:
         channels=INPUT_CHANNELS,
         dtype="int16",
         device=INPUT_DEVICE,
-        blocksize=BUFFER_SIZE,
+        blocksize=BUFFER_SIZE if BUFFER_SIZE > 0 else 0,
         latency="high",
         callback=callback,
     ):
+        stream_start_ts = time.monotonic()
         input("录音中，完成后按回车结束...")
 
     if overflow_count > 0:
-        logger.warning("本次录音发生 input overflow 次数: %s（建议继续增大 audio.buffer_size）", overflow_count)
+        logger.warning(
+            "本次录音发生 input overflow 次数: %s（启动前 %sms 已忽略，建议尝试更大 audio.buffer_size 或设为 0 自适应）",
+            overflow_count,
+            OVERFLOW_GRACE_MS,
+        )
+    if other_status_count > 0:
+        logger.warning("本次录音出现其他输入状态告警次数: %s", other_status_count)
 
     if not frames:
         return b""
