@@ -30,7 +30,6 @@ HA_TOKEN = ha_cfg.get("token", "YOUR_HA_TOKEN")
 DEFAULT_AREA = str(ha_cfg.get("default_area", "客厅")).strip()
 AREA_ALIASES_CFG = ha_cfg.get("area_aliases") or {}
 OUTPUT_LANGUAGE = str(ha_cfg.get("response_language", "zh-CN")).strip()
-ASSIST_AUDIO_MODE = bool(ha_cfg.get("assist_audio_mode", False))
 ASSIST_PIPELINE_ID = str(ha_cfg.get("assist_pipeline_id", "")).strip()
 ASSIST_INPUT_SAMPLE_RATE = int(audio_cfg.get("sample_rate", 16000))
 ASSIST_AUDIO_TIMEOUT_S = float(ha_cfg.get("assist_audio_timeout_s", 45))
@@ -581,10 +580,6 @@ def _ha_request(method: str, api_path: str, json_payload: dict | None = None, ti
             logger.warning("HA request failed via %s: %s", base, exc)
 
     raise last_error if last_error else RuntimeError("Home Assistant request failed")
-
-
-def use_assist_audio_mode() -> bool:
-    return ASSIST_AUDIO_MODE
 
 
 def _is_name_resolution_error(exc: Exception) -> bool:

@@ -5,28 +5,6 @@ server:
   port: 8000
   debug: false
 
-stt:
-  engine: wyoming
-  host: 127.0.0.1
-  port: 10400
-  language: zh-CN
-  sample_rate: 48000
-  sample_width: 2 # bytes, 16-bit
-  channels: 1
-  target_sample_rate: 16000
-  target_sample_width: 2
-  target_channels: 1
-  chunk_ms: 30
-
-tts:
-  engine: wyoming
-  host: 127.0.0.1
-  port: 10400
-  voice: vits-melo-tts-zh_en
-  sample_rate: 48000
-  sample_width: 2
-  channels: 2
-
 llm:
   engine: ollama
   model: qwen3.5:9b
@@ -44,8 +22,7 @@ llm:
 home_assistant:
   enabled: true
   url: http://homeassistant.local:8123
-  # Set to true to bypass local STT/LLM/TTS and forward raw audio to HA Assist pipeline.
-  assist_audio_mode: true
+  # Audio requests are always forwarded to HA Assist pipeline.
   # Optional pipeline id. Leave empty to use HA default Assist pipeline.
   assist_pipeline_id: ""
   # Timeout for HA Assist websocket run.

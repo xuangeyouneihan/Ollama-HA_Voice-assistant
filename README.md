@@ -1,12 +1,12 @@
 # HumbleVoice - Open Source Smart Speaker
 
-A privacy-focused, offline-capable smart speaker system using local LLMs and Home Assistant integration. Built with ESP32 hardware and runs completely on your local network.
+A privacy-focused smart speaker system built around Home Assistant Assist pipeline. Built with ESP32 hardware and designed for local-network deployment.
 
 ## Features
 
-- **100% Offline**: No cloud dependencies, all processing happens locally
+- **HA Assist Pipeline**: Voice requests are forwarded to Home Assistant Assist pipeline
 - **ESP32 Client**: Microphone and speaker integration via I2S
-- **Local LLM**: Uses Ollama for private AI conversations
+- **Automation Task API**: Text-to-automation CRUD endpoints for Home Assistant workflows
 - **Home Assistant Integration**: Control smart home devices with voice
 - **Open Source**: Fully customizable and transparent
 - **Arduino IDE Compatible**: Easy ESP32 firmware setup
@@ -25,22 +25,22 @@ You can build and test automation presets before smart devices are ready.
 
 ### Auto apply after task change
 
-- 创建/修改/删除任务后，服务会自动尝试调用：
+- After creating/updating/deleting a task, the service will automatically try to call:
   - `script.reload`
   - `automation.reload`
-- 返回结果中的 `applied` 字段会给出自动生效是否成功。
-- 如果自动生效失败，语音回复会提示你在 HA 手动重载。
+- The `applied` field in the response indicates whether auto-apply succeeded.
+- If auto-apply fails, the voice response will remind you to reload in Home Assistant manually.
 
 ### One sentence to create HA automation
 
-- 你可以直接对本地语音助手说一句：
-  - `每天早上7点如果卧室温度低于18度就打开卧室空调`
-- 程序会自动执行：
-  - 使用 LLM 解析自然语言为 preset
-  - 自动保存 preset
-  - 自动编译成 HA 原生 `script` + `automation`
-  - 导出 YAML 到 `server/data/ha_exports/`
-- 把导出的 YAML 合并到 Home Assistant 配置后，重载 `automation` 与 `script` 即可生效。
+- You can speak one sentence directly to the local voice assistant:
+  - `Every morning at 7:00, if the bedroom temperature is below 18°C, turn on the bedroom AC.`
+- The system will automatically:
+  - Use the LLM to parse natural language into a preset
+  - Save the preset
+  - Compile it into native Home Assistant `script` + `automation`
+  - Export YAML to `server/data/ha_exports/`
+- Merge the exported YAML into your Home Assistant configuration, then reload `automation` and `script` to apply.
 
 ### Minimal preset payload example
 

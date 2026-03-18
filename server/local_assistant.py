@@ -1,5 +1,5 @@
 """
-本地语音助手入口：使用本机麦克风录音 -> Wyoming STT -> HA/LLM -> Wyoming TTS -> 本机扬声器播放。
+本地语音助手入口：使用本机麦克风录音 -> Home Assistant Assist pipeline -> 本机扬声器播放。
 用法：
     python server/local_assistant.py
 在终端按回车开始录音，再按回车结束录音。
@@ -13,18 +13,14 @@ import numpy as np
 import sounddevice as sd
 
 from config_loader import get_config
-from modules import stt, tts, ha_client
+from modules import ha_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("local_assistant")
 
 cfg = get_config()
 
-
-
 audio_cfg = cfg.get("audio", {}) if cfg else {}
-tts_cfg = cfg.get("tts", {}) if cfg else {}
-ha_cfg = cfg.get("home_assistant", {}) if cfg else {}
 
 SAMPLE_RATE = int(audio_cfg.get("sample_rate", 16000))
 INPUT_CHANNELS = int(audio_cfg.get("input_channels", audio_cfg.get("channels", 1)))
@@ -46,7 +42,6 @@ SILENCE_MAX_HEAD_TRIM_MS = int(audio_cfg.get("silence_max_head_trim_ms", 300))
 DEBUG_SAVE_WAV = bool(audio_cfg.get("debug_save_wav", False))
 DEBUG_WAV_PATH = str(audio_cfg.get("debug_wav_path", "server/debug_last_record.wav"))
 MONITOR_INPUT = bool(audio_cfg.get("monitor_input", False))
-ASSIST_AUDIO_MODE = bool(ha_cfg.get("assist_audio_mode", False))
 
 
 def _describe_device(device, kind: str):
@@ -293,54 +288,34 @@ def handle_once():
             channels=INPUT_CHANNELS,
         )
 
-    if ASSIST_AUDIO_MODE:
-        result = asyncio.run(
-            ha_client.process_audio_with_assist_pipeline(
-                audio_bytes,
-                sample_rate=SAMPLE_RATE,
-            )
+    result = asyncio.run(
+        ha_client.process_audio_with_assist_pipeline(
+            audio_bytes,
+            sample_rate=SAMPLE_RATE,
         )
-        if not bool(result.get("ok", False)):
-            message = str(result.get("message") or "assist pipeline request failed")
-            print(f"HA Assist 失败: {message}")
-            return
-
-        transcript = str(result.get("transcript") or "").strip()
-        if transcript:
-            print(f"识别: {transcript}")
-
-        reply = str(result.get("response_text") or "").strip()
-        if reply:
-            print(f"回复: {reply}")
-
-        tts_audio = result.get("tts_audio") or b""
-        tts_rate = int(result.get("tts_sample_rate") or 0)
-        tts_width = int(result.get("tts_sample_width") or 0)
-        tts_channels = int(result.get("tts_channels") or 0)
-        if tts_audio and tts_rate > 0 and tts_width > 0 and tts_channels > 0:
-            play_audio(tts_audio, tts_rate, tts_width, tts_channels)
-            return
-
-        print("HA Assist TTS 音频不可播放（可能不是 WAV/PCM），暂不播放")
-        return
-
-    text = stt.transcribe(
-        audio_bytes,
-        sample_rate=SAMPLE_RATE,
-        sample_width=SAMPLE_WIDTH,
-        channels=INPUT_CHANNELS,
     )
-    print(f"识别: {text}")
-
-    reply = ha_client.handle_user_text(text)
-
-    print(f"回复: {reply}")
-
-    audio_reply, tts_rate, tts_width, tts_channels = tts.synthesize_with_format(reply)
-    if not audio_reply:
-        print("TTS 失败，未播放音频")
+    if not bool(result.get("ok", False)):
+        message = str(result.get("message") or "assist pipeline request failed")
+        print(f"HA Assist 失败: {message}")
         return
-    play_audio(audio_reply, tts_rate, tts_width, tts_channels)
+
+    transcript = str(result.get("transcript") or "").strip()
+    if transcript:
+        print(f"识别: {transcript}")
+
+    reply = str(result.get("response_text") or "").strip()
+    if reply:
+        print(f"回复: {reply}")
+
+    tts_audio = result.get("tts_audio") or b""
+    tts_rate = int(result.get("tts_sample_rate") or 0)
+    tts_width = int(result.get("tts_sample_width") or 0)
+    tts_channels = int(result.get("tts_channels") or 0)
+    if tts_audio and tts_rate > 0 and tts_width > 0 and tts_channels > 0:
+        play_audio(tts_audio, tts_rate, tts_width, tts_channels)
+        return
+
+    print("HA Assist TTS 音频不可播放（可能不是 WAV/PCM），暂不播放")
 
 
 def main():
