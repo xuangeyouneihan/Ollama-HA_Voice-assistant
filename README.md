@@ -1,98 +1,56 @@
-# HumbleVoice - Open Source Smart Speaker
+# HumbleVoice
 
-A privacy-focused smart speaker system built around Home Assistant Assist pipeline. Built with ESP32 hardware and designed for local-network deployment.
+Home Assistant Assist pipeline based voice assistant. Current codebase focuses on audio flow only.
 
-## Features
+## Current Architecture
 
-- **HA Assist Pipeline**: Voice requests are forwarded to Home Assistant Assist pipeline
-- **ESP32 Client**: Microphone and speaker integration via I2S
-- **Automation Task API**: Text-to-automation CRUD endpoints for Home Assistant workflows
-- **Home Assistant Integration**: Control smart home devices with voice
-- **Open Source**: Fully customizable and transparent
-- **Arduino IDE Compatible**: Easy ESP32 firmware setup
+- Local mode: `server/local_assistant.py`
+  - Microphone capture on local machine
+  - Send raw audio to Home Assistant Assist pipeline
+  - Play returned TTS audio on local speaker
+- ESP32 mode: `server/main.py` + `ESP32_firmware/Arduino IDE/Alexa.ino`
+  - ESP32 streams microphone audio to server `/audio`
+  - Server forwards to Home Assistant Assist pipeline
+  - Server sends TTS audio bytes back to ESP32
 
-## Preset Workflow (No Real Devices Required)
+## What Was Removed
 
-You can build and test automation presets before smart devices are ready.
+- LLM module (`server/modules/llm.py`)
+- Preset/task module (`server/modules/presets.py`)
+- Task/preset related APIs
 
-### What is available now
+## Requirements
 
-- Preset CRUD API in server
-- Preset simulation API (no real HA call)
-- Compile preset to Home Assistant script/automation dictionaries
-
-### API endpoints
-
-### Auto apply after task change
-
-- After creating/updating/deleting a task, the service will automatically try to call:
-  - `script.reload`
-  - `automation.reload`
-- The `applied` field in the response indicates whether auto-apply succeeded.
-- If auto-apply fails, the voice response will remind you to reload in Home Assistant manually.
-
-### One sentence to create HA automation
-
-- You can speak one sentence directly to the local voice assistant:
-  - `Every morning at 7:00, if the bedroom temperature is below 18°C, turn on the bedroom AC.`
-- The system will automatically:
-  - Use the LLM to parse natural language into a preset
-  - Save the preset
-  - Compile it into native Home Assistant `script` + `automation`
-  - Export YAML to `server/data/ha_exports/`
-- Merge the exported YAML into your Home Assistant configuration, then reload `automation` and `script` to apply.
-
-### Minimal preset payload example
-
-```json
-{
-  "name": "Rain Close Cover",
-  "enabled": true,
-  "trigger": {
-    "type": "state",
-    "entity_id": "binary_sensor.rain_detected",
-    "to": "on"
-  },
-  "conditions": [
-    {
-      "type": "time",
-      "after": "06:00:00",
-      "before": "23:00:00"
-    }
-  ],
-  "actions": [
-    {
-      "service": "cover.close_cover",
-      "target": {
-        "entity_id": ["cover.living_room"]
-      },
-      "service_data": {}
-    }
-  ]
-}
-```
-
-## Hardware Requirements
-
-### Server (Raspberry Pi 4/5 or Linux computer)
-
-- Raspberry Pi 4 (4GB+ RAM) or modern Linux computer
-- MicroSD card (32GB+) or SSD for storage
-- Ethernet or WiFi connection
-
-### Client (ESP32 Device)
-
-- ESP32-S3-Box (recommended) or ESP32-S3 development board
-- I2S microphone (built-in on ESP32-S3-Box)
-- I2S speaker (optional, for audio playback)
-- Micro-USB or USB-C cable for programming
+- Python 3.10+
+- Home Assistant instance with Assist pipeline enabled
+- Valid long-lived access token in `server/config.yaml` (or private override)
+- For local mode: working microphone and speaker on host machine
 
 ## Quick Start
 
-### Server Setup (Raspberry Pi/Linux)
+1. Install dependencies:
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/humblevoice.git
-   cd humblevoice
-   ```
+```bash
+pip install -r server/requirements.txt
+```
+
+2. Configure Home Assistant URL/token in `server/config.yaml` (or `config.private.yaml`).
+
+3. Choose one run mode:
+
+- Local mode:
+
+```bash
+python server/local_assistant.py
+```
+
+- ESP32 bridge mode:
+
+```bash
+python server/main.py
+```
+
+## Notes
+
+- ESP32 firmware is configured to connect WebSocket path `/audio` on port `8000`.
+- ESP32 playback implementation is still TODO in firmware (`handleBinaryMessage`).

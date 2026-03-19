@@ -1,19 +1,47 @@
-# HumbleVoice ESP32 Client Firmware
+# HumbleVoice ESP32 Firmware
 
-This firmware runs on ESP32 hardware to create a smart speaker client that streams audio to the HumbleVoice server.
+ESP32 client firmware for streaming microphone audio to server `/audio` over WebSocket.
 
-## Hardware Requirements
+## Hardware
 
-- **ESP32-S3-Box** (recommended) or **ESP32-S3 Dev Board**
-- **I2S Microphone** (built-in on ESP32-S3-Box, or external INMP441)
-- **I2S Speaker** (optional, for audio playback)
-- **Micro-USB or USB-C** for programming
+- ESP32-S3-Box (recommended) or ESP32-S3 dev board
+- I2S microphone (built-in or external)
+- Optional I2S speaker for playback experiments
+- USB cable for flashing
 
 ## Arduino IDE Setup
 
-### 1. Install Arduino IDE
-Download from [arduino.cc](https://www.arduino.cc/en/software)
+1. Install Arduino IDE.
+2. Install ESP32 board package.
+3. Install required libraries:
+   - WebSockets (links2004)
+   - ArduinoJson (Benoit Blanchon)
 
-### 2. Install ESP32 Board Package
-1. Go to **File > Preferences**
-2. Add to "Additional Board Manager URLs":
+## Firmware Config
+
+Edit `Alexa.ino`:
+
+- `ssid`
+- `password`
+- `server_ip`
+- `server_port` (default `8000`)
+
+WebSocket path is hardcoded to `/audio`.
+
+## Run Flow
+
+1. Start server bridge on host:
+
+```bash
+python server/main.py
+```
+
+2. Flash ESP32 firmware.
+3. Open serial monitor and verify:
+   - WiFi connected
+   - WebSocket connected
+   - Binary audio frames being sent
+
+## Important Limitation
+
+- `handleBinaryMessage` playback on ESP32 is still not fully implemented. The firmware can receive TTS bytes, but local speaker playback path is currently placeholder.
