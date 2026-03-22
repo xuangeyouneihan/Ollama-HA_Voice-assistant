@@ -19,18 +19,30 @@ intents:
       - sentences:
           - "create an automation {text}"
           - "help me create an automation {text}"
+          - "create a scheduled task {text}"
+          - "help me create a scheduled task {text}"
+          - "create a planned task {text}"
+          - "add a scheduled task {text}"
 
   HVUpdateAutomation:
     data:
       - sentences:
           - "update automation {text}"
           - "modify automation {text}"
+          - "update scheduled task {text}"
+          - "modify scheduled task {text}"
+          - "edit planned task {text}"
+          - "change scheduled task to {text}"
 
   HVDeleteAutomation:
     data:
       - sentences:
           - "delete automation {text}"
           - "remove automation {text}"
+          - "delete scheduled task {text}"
+          - "remove scheduled task {text}"
+          - "cancel scheduled task {text}"
+          - "disable planned task {text}"
 
 lists:
   # Example list placeholder (optional)

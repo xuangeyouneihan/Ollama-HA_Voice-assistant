@@ -22,12 +22,26 @@ llm:
 home_assistant:
   enabled: true
   url: http://homeassistant.local:8123
+  # Home Assistant configuration directory on local filesystem.
+  # automation_manager writes automations directly to <config_dir>/automations.yaml
+  config_dir: /var/lib/homeassistant/homeassistant
+  # Pre-write backup settings for automations.yaml
+  # Backup files are stored as: automations.<timestamp>.<id>.yaml.bak
+  automation_backup_dir: /var/lib/homeassistant/homeassistant/backups/automations
+  automation_backup_keep: 20
+  # Planner retries after dry-run validation fails. Total attempts = retry_max + 1.
+  automation_plan_retry_max: 2
+  # Auto expose newly created automations to Assist conversation unless explicitly opted out in user text.
+  automation_auto_expose_default: true
+  # Restrict update/delete matching to automations exposed to Assist conversation.
+  manage_only_exposed_automations: true
   # Audio requests are always forwarded to HA Assist pipeline.
   # Optional pipeline id. Leave empty to use HA default Assist pipeline.
   assist_pipeline_id: ""
   # Timeout for HA Assist websocket run.
   assist_audio_timeout_s: 45
   auto_discover: true
+  automation_conversation_agent: conversation.automation_manager
 
 audio:
   sample_rate: 44100

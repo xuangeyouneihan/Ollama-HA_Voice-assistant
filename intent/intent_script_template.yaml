@@ -8,6 +8,14 @@
 # - HVCreateAutomation
 # - HVUpdateAutomation
 # - HVDeleteAutomation
+#
+# Two-step behavior for update/delete:
+# 1) First call to manage endpoint returns a confirmation message and a pending action.
+# 2) User says a confirmation phrase (e.g. "确认", "确定", "confirm").
+# 3) Backend confirms the latest pending action for that operation.
+#
+# Optional: if your client can pass confirmation_id, call manage endpoint with:
+#   {"confirmation_id": "...", "confirm": true, "expected_operation": "task_update|task_delete"}
 
 intent_script:
   HVCreateAutomation:

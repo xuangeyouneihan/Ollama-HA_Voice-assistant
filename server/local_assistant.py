@@ -13,7 +13,7 @@ import numpy as np
 import sounddevice as sd
 
 from config_loader import get_config
-from modules import ha_client
+from modules.ha_fallback import run_assist_pipeline_with_fallback
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("local_assistant")
@@ -288,34 +288,38 @@ def handle_once():
             channels=INPUT_CHANNELS,
         )
 
-    result = asyncio.run(
-        ha_client.process_audio_with_assist_pipeline(
+    flow = asyncio.run(
+        run_assist_pipeline_with_fallback(
             audio_bytes,
             sample_rate=SAMPLE_RATE,
         )
     )
-    if not bool(result.get("ok", False)):
-        message = str(result.get("message") or "assist pipeline request failed")
+    if not bool(flow.get("ok", False)):
+        message = str(flow.get("message") or "assist pipeline request failed")
         print(f"HA Assist 失败: {message}")
         return
 
-    transcript = str(result.get("transcript") or "").strip()
+    transcript = str(flow.get("transcript") or "").strip()
     if transcript:
         print(f"识别: {transcript}")
 
-    reply = str(result.get("response_text") or "").strip()
+    reply = str(flow.get("response_text") or "").strip()
     if reply:
         print(f"回复: {reply}")
 
-    tts_audio = result.get("tts_audio") or b""
-    tts_rate = int(result.get("tts_sample_rate") or 0)
-    tts_width = int(result.get("tts_sample_width") or 0)
-    tts_channels = int(result.get("tts_channels") or 0)
-    if tts_audio and tts_rate > 0 and tts_width > 0 and tts_channels > 0:
+    tts_audio = flow.get("tts_audio") or b""
+    tts_rate = int(flow.get("tts_sample_rate") or 0)
+    tts_width = int(flow.get("tts_sample_width") or 0)
+    tts_channels = int(flow.get("tts_channels") or 0)
+    if bool(flow.get("has_playable_tts", False)):
         play_audio(tts_audio, tts_rate, tts_width, tts_channels)
         return
 
-    print("HA Assist TTS 音频不可播放（可能不是 WAV/PCM），暂不播放")
+    fallback_text = str(flow.get("fallback_text") or "").strip()
+    if fallback_text and fallback_text != reply:
+        print(f"回复: {fallback_text}")
+    else:
+        print("HA Assist TTS 音频不可播放（已走文本兜底）")
 
 
 def main():

@@ -17,6 +17,12 @@ intents:
           - "添加自动化 {text}"
           - "请创建一个自动化 {text}"
           - "做一个自动化 {text}"
+          - "创建计划任务 {text}"
+          - "帮我创建计划任务 {text}"
+          - "新建计划任务 {text}"
+          - "添加计划任务 {text}"
+          - "创建定时任务 {text}"
+          - "新建定时任务 {text}"
 
   HVUpdateAutomation:
     data:
@@ -28,6 +34,12 @@ intents:
           - "把自动化改成 {text}"
           - "调整自动化 {text}"
           - "编辑自动化 {text}"
+          - "修改计划任务 {text}"
+          - "更新计划任务 {text}"
+          - "帮我修改计划任务 {text}"
+          - "把计划任务改成 {text}"
+          - "修改定时任务 {text}"
+          - "调整定时任务 {text}"
 
   HVDeleteAutomation:
     data:
@@ -39,6 +51,12 @@ intents:
           - "把这个自动化删掉 {text}"
           - "停止这个自动化 {text}"
           - "禁用自动化 {text}"
+          - "删除计划任务 {text}"
+          - "移除计划任务 {text}"
+          - "取消计划任务 {text}"
+          - "删除定时任务 {text}"
+          - "停止定时任务 {text}"
+          - "禁用定时任务 {text}"
 
 lists:
   # Optional placeholder for future slot normalization
