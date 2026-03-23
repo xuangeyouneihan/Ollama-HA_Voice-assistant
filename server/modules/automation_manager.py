@@ -37,6 +37,10 @@ _META_PATTERN = re.compile(r"(?:\n|\r\n)?HV_META:(\{.*\})\s*$", re.DOTALL)
 class AutomationError(RuntimeError):
     """Raised when automation operation fails."""
 
+    def __init__(self, message: str, debug: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.debug = debug or {}
+
 
 @dataclass
 class MatchResult:
@@ -355,6 +359,43 @@ class HomeAssistantAutomationClient:
                     mapped[assistant] = bool(value)
             exposed[entity_id] = mapped
         return exposed
+
+    def list_state_entity_ids(self) -> set[str]:
+        states = self._request_json("GET", "/api/states")
+        if not isinstance(states, list):
+            return set()
+
+        result: set[str] = set()
+        for item in states:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id") or "").strip()
+            if entity_id:
+                result.add(entity_id)
+        return result
+
+    def list_domain_entities(self, domain: str) -> list[dict[str, str]]:
+        dom = str(domain or "").strip().lower()
+        if not dom:
+            return []
+
+        states = self._request_json("GET", "/api/states")
+        if not isinstance(states, list):
+            return []
+
+        rows: list[dict[str, str]] = []
+        prefix = f"{dom}."
+        for item in states:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id") or "").strip()
+            if not entity_id.startswith(prefix):
+                continue
+            attrs_raw = item.get("attributes")
+            attrs: dict[str, Any] = attrs_raw if isinstance(attrs_raw, dict) else {}
+            friendly = str(attrs.get("friendly_name") or "").strip()
+            rows.append({"entity_id": entity_id, "friendly_name": friendly})
+        return rows
 
     def validate_automation_config(
         self,
@@ -724,6 +765,17 @@ class AutomationManager:
         return []
 
     @staticmethod
+    def _json_like_equal(left: Any, right: Any) -> bool:
+        try:
+            return json.dumps(left, ensure_ascii=False, sort_keys=True) == json.dumps(
+                right,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        except TypeError:
+            return left == right
+
+    @staticmethod
     def _normalize_time_string(value: str) -> str | None:
         raw = str(value or "").strip()
         if not raw:
@@ -771,6 +823,84 @@ class AutomationManager:
             return []
         return [{"action": service}]
 
+    @staticmethod
+    def _collect_entity_ids_from_value(value: Any) -> set[str]:
+        refs: set[str] = set()
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return refs
+            # Skip dynamic templates that cannot be validated statically.
+            if "{{" in raw or "{%" in raw:
+                return refs
+            if re.match(r"^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$", raw):
+                refs.add(raw)
+            return refs
+
+        if isinstance(value, list):
+            for item in value:
+                refs.update(AutomationManager._collect_entity_ids_from_value(item))
+            return refs
+
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key) == "entity_id":
+                    refs.update(AutomationManager._collect_entity_ids_from_value(item))
+                elif isinstance(item, (dict, list)):
+                    refs.update(AutomationManager._collect_entity_ids_from_value(item))
+            return refs
+
+        return refs
+
+    def _validate_entities_exposed(
+        self,
+        triggers: list[dict[str, Any]],
+        conditions: list[dict[str, Any]],
+        actions: list[dict[str, Any]],
+    ) -> str | None:
+        exposed_map = self.client.list_exposed_entities()
+        exposed_entities = {
+            entity_id
+            for entity_id, flags in exposed_map.items()
+            if isinstance(flags, dict) and bool(flags.get("conversation", False))
+        }
+        known_entities = self.client.list_state_entity_ids()
+
+        referenced: set[str] = set()
+        for block in (triggers, conditions, actions):
+            referenced.update(self._collect_entity_ids_from_value(block))
+
+        for act in actions:
+            if not isinstance(act, dict):
+                continue
+            service = str(act.get("action") or "").strip()
+            # Only treat script.<name> as script entity shorthand when it is not
+            # one of script domain built-in services.
+            if re.match(r"^script\.[a-zA-Z0-9_]+$", service):
+                script_name = service.split(".", 1)[1]
+                if script_name in {"turn_on", "turn_off", "toggle", "reload"}:
+                    continue
+                referenced.add(service)
+
+        # Ignore special shorthand values that are not concrete entities.
+        referenced = {entity for entity in referenced if entity not in {"all", "none"}}
+        if not referenced:
+            return None
+
+        # Generic anti-misclassification: only enforce exposure policy on IDs
+        # that are actual HA entities in current states.
+        enforce_refs = sorted(entity for entity in referenced if entity in known_entities)
+        if not enforce_refs:
+            return None
+
+        not_exposed = sorted(entity for entity in enforce_refs if entity not in exposed_entities)
+        if not_exposed:
+            return (
+                "referenced entities are not exposed to Assist: "
+                + ", ".join(not_exposed)
+            )
+        return None
+
     def _dry_run_validate_payload(
         self,
         triggers: list[dict[str, Any]],
@@ -797,12 +927,21 @@ class AutomationManager:
                 at = self._normalize_time_string(str(trig.get("at") or "").strip())
                 if not at:
                     return f"trigger[{idx}] invalid time trigger, requires at=HH:MM[:SS]"
+            if trigger_type in {"state", "numeric_state"}:
+                refs = self._collect_entity_ids_from_value(trig)
+                if not refs:
+                    return f"trigger[{idx}] requires entity_id for {trigger_type}"
 
         for idx, cond in enumerate(conditions):
             if not isinstance(cond, dict):
                 return f"condition[{idx}] is not an object"
-            if not str(cond.get("condition") or "").strip():
+            condition_type = str(cond.get("condition") or "").strip().lower()
+            if not condition_type:
                 return f"condition[{idx}] missing required key: condition"
+            if condition_type in {"state", "numeric_state"}:
+                refs = self._collect_entity_ids_from_value(cond)
+                if not refs:
+                    return f"condition[{idx}] requires entity_id for {condition_type}"
 
         for idx, act in enumerate(actions):
             if not isinstance(act, dict):
@@ -812,6 +951,36 @@ class AutomationManager:
                 return f"action[{idx}] missing required key: action"
             if "." not in action_service:
                 return f"action[{idx}] should be domain.service format"
+            if action_service == "scene.turn_on":
+                target_entity: Any = None
+                target_raw = act.get("target")
+                if isinstance(target_raw, dict):
+                    target_entity = target_raw.get("entity_id")
+                if target_entity is None:
+                    data_raw = act.get("data")
+                    if isinstance(data_raw, dict):
+                        target_entity = data_raw.get("entity_id")
+
+                cleaned_target = self._sanitize_entity_id_field(target_entity)
+                has_scene_target = False
+                if isinstance(cleaned_target, str):
+                    has_scene_target = cleaned_target.startswith("scene.")
+                elif isinstance(cleaned_target, list):
+                    has_scene_target = any(str(v).startswith("scene.") for v in cleaned_target)
+
+                if not has_scene_target:
+                    return f"action[{idx}] scene.turn_on requires target.entity_id (scene.*)"
+
+        known_entities = self.client.list_state_entity_ids()
+        referenced = self._collect_entity_ids_from_value([triggers, conditions, actions])
+        referenced = {entity for entity in referenced if entity not in {"all", "none"}}
+        unknown = sorted(entity for entity in referenced if entity not in known_entities)
+        if unknown:
+            return "referenced entities not found in Home Assistant states: " + ", ".join(unknown)
+
+        exposure_error = self._validate_entities_exposed(triggers, conditions, actions)
+        if exposure_error:
+            return exposure_error
 
         ha_validation_error = self.client.validate_automation_config(triggers, conditions, actions)
         if ha_validation_error:
@@ -824,22 +993,200 @@ class AutomationManager:
         for item in trigger_list:
             if not isinstance(item, dict):
                 continue
-            trigger_type = str(item.get("trigger") or item.get("platform") or item.get("event") or "").strip().lower()
+
+            raw_trigger = item.get("trigger")
+            raw_platform = item.get("platform")
+            raw_event = item.get("event")
+
+            trigger_type = ""
+            if isinstance(raw_trigger, str):
+                trigger_type = raw_trigger.strip().lower()
+            elif isinstance(raw_platform, str):
+                trigger_type = raw_platform.strip().lower()
+            elif isinstance(raw_event, str):
+                trigger_type = raw_event.strip().lower()
+
+            # Accept shorthand like trigger="time:09:00" from LLM outputs.
+            if trigger_type.startswith("time:"):
+                at_short = self._normalize_time_string(trigger_type.split(":", 1)[1].strip())
+                if at_short:
+                    normalized.append({"trigger": "time", "at": at_short})
+                    continue
+
             if trigger_type == "time":
                 at = self._normalize_time_string(str(item.get("at") or item.get("from") or "").strip())
                 if at:
                     normalized.append({"trigger": "time", "at": at})
                 continue
-            # Keep already valid-looking trigger entries.
-            if item.get("trigger"):
-                normalized.append(item)
+
+            # Keep valid non-time trigger entries, but normalize key style and
+            # drop legacy/invalid platform field to avoid schema/type errors.
+            if trigger_type:
+                normalized_item = dict(item)
+                normalized_item["trigger"] = trigger_type
+                normalized_item.pop("platform", None)
+                normalized.append(normalized_item)
 
         if normalized:
             return normalized
         return self._extract_time_trigger_from_text(text)
 
+    def _infer_scene_entity_from_text(self, text: str) -> str | None:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return None
+
+        scenes = self.client.list_domain_entities("scene")
+        if not scenes:
+            return None
+
+        query = self._normalize_text(raw_text)
+        if not query:
+            return None
+
+        best_entity = ""
+        best_score = 0.0
+        for row in scenes:
+            entity_id = str(row.get("entity_id") or "").strip()
+            friendly = str(row.get("friendly_name") or "").strip()
+            if not entity_id:
+                continue
+
+            entity_tail = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+            candidate = self._normalize_text(" ".join([entity_tail, friendly, entity_id]))
+            if not candidate:
+                continue
+
+            score = max(
+                self._sequence_score(query, candidate),
+                self._token_overlap_score(query, candidate),
+            )
+            if score > best_score:
+                best_score = score
+                best_entity = entity_id
+
+        if best_entity and best_score >= 0.22:
+            return best_entity
+        return None
+
+    @staticmethod
+    def _is_entity_id_like(value: str) -> bool:
+        return bool(re.match(r"^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$", value))
+
+    @staticmethod
+    def _is_service_name_like(value: str) -> bool:
+        parts = value.split(".", 1)
+        if len(parts) != 2:
+            return False
+        service_name = parts[1]
+        common_services = {
+            "turn_on",
+            "turn_off",
+            "toggle",
+            "reload",
+            "set_value",
+            "set_temperature",
+            "open_cover",
+            "close_cover",
+            "stop_cover",
+            "activate",
+            "play",
+            "pause",
+            "stop",
+        }
+        return service_name in common_services
+
+    def _sanitize_entity_id_field(self, value: Any) -> str | list[str] | None:
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            if "{{" in raw or "{%" in raw:
+                return raw
+            if self._is_service_name_like(raw):
+                return None
+            if self._is_entity_id_like(raw):
+                return raw
+            m = re.search(r"([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)", raw)
+            if not m:
+                return None
+            candidate = m.group(1)
+            if self._is_service_name_like(candidate):
+                return None
+            return candidate
+
+        if isinstance(value, list):
+            sanitized: list[str] = []
+            for item in value:
+                cleaned = self._sanitize_entity_id_field(item)
+                if isinstance(cleaned, str) and cleaned:
+                    sanitized.append(cleaned)
+            return sanitized or None
+
+        return None
+
+    def _sanitize_entity_ids_recursive(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            sanitized: dict[str, Any] = {}
+            for key, sub in value.items():
+                key_str = str(key)
+                if key_str == "entity_id":
+                    cleaned = self._sanitize_entity_id_field(sub)
+                    if cleaned is not None:
+                        sanitized[key_str] = cleaned
+                    continue
+
+                cleaned_sub = self._sanitize_entity_ids_recursive(sub)
+                if isinstance(cleaned_sub, dict) and not cleaned_sub:
+                    continue
+                if isinstance(cleaned_sub, list) and not cleaned_sub:
+                    continue
+                sanitized[key_str] = cleaned_sub
+            return sanitized
+
+        if isinstance(value, list):
+            sanitized_list: list[Any] = []
+            for item in value:
+                cleaned_item = self._sanitize_entity_ids_recursive(item)
+                if isinstance(cleaned_item, dict) and not cleaned_item:
+                    continue
+                if isinstance(cleaned_item, list) and not cleaned_item:
+                    continue
+                sanitized_list.append(cleaned_item)
+            return sanitized_list
+
+        return value
+
+    def _normalize_condition_list(self, condition_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in condition_list:
+            if not isinstance(item, dict):
+                continue
+
+            condition_type = str(item.get("condition") or item.get("type") or "").strip().lower()
+            if not condition_type:
+                continue
+
+            normalized_item = dict(item)
+            normalized_item["condition"] = condition_type
+            normalized_item.pop("type", None)
+            normalized_item = self._sanitize_entity_ids_recursive(normalized_item)
+            if isinstance(normalized_item, dict) and normalized_item:
+                normalized.append(normalized_item)
+
+        return normalized
+
     def _normalize_action_list(self, action_list: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
+        inferred_scene_entity_id: str | None = None
+
+        def ensure_inferred_scene_id() -> str | None:
+            nonlocal inferred_scene_entity_id
+            if inferred_scene_entity_id is not None:
+                return inferred_scene_entity_id or None
+            inferred_scene_entity_id = self._infer_scene_entity_from_text(text) or ""
+            return inferred_scene_entity_id or None
+
         for item in action_list:
             if not isinstance(item, dict):
                 continue
@@ -849,9 +1196,107 @@ class AutomationManager:
             if not service and item.get("script"):
                 service = str(item.get("script") or "").strip()
 
-            service = self._coerce_script_service(service) or service
+            # Keep valid domain.service actions as-is; only coerce script shorthand.
+            if service.startswith("scripts."):
+                service = "script." + service.split(".", 1)[1]
+            elif "." not in service:
+                service = self._coerce_script_service(service) or service
+
+            # Repair malformed script shorthand (e.g. "script", "script.", "script.script").
+            if service in {"script", "script.", "script.script"}:
+                target_entity = ""
+                target_raw = item.get("target")
+                if isinstance(target_raw, dict):
+                    target_entity_raw = target_raw.get("entity_id")
+                    if isinstance(target_entity_raw, str):
+                        target_entity = target_entity_raw.strip()
+                    elif isinstance(target_entity_raw, list):
+                        first = next((x for x in target_entity_raw if isinstance(x, str) and x.strip()), "")
+                        target_entity = str(first).strip()
+                if not target_entity and isinstance(item.get("entity_id"), str):
+                    target_entity = str(item.get("entity_id") or "").strip()
+
+                if target_entity.startswith("script.") and len(target_entity) > len("script."):
+                    service = target_entity
+                else:
+                    fallback = self._extract_script_action_from_text(text)
+                    if fallback:
+                        service = str(fallback[0].get("action") or service).strip()
+
             if service:
-                normalized.append({"action": service})
+                script_entity_target = ""
+                if re.match(r"^script\.[a-zA-Z0-9_]+$", service):
+                    script_name = service.split(".", 1)[1]
+                    if script_name not in {"turn_on", "turn_off", "toggle", "reload"}:
+                        # Canonicalize script entity shorthand to script.turn_on + target.entity_id.
+                        script_entity_target = service
+                        service = "script.turn_on"
+
+                normalized_item = dict(item)
+                normalized_item.pop("service", None)
+                normalized_item["action"] = service
+
+                # Convert flattened dotted key style to nested target object.
+                if "target.entity_id" in normalized_item:
+                    flat_entity = normalized_item.pop("target.entity_id")
+                    target_obj = normalized_item.get("target")
+                    if not isinstance(target_obj, dict):
+                        target_obj = {}
+                    target_obj["entity_id"] = flat_entity
+                    normalized_item["target"] = target_obj
+
+                # Accept common alternate payload keys from LLM output.
+                if "service_data" in normalized_item and "data" not in normalized_item:
+                    normalized_item["data"] = normalized_item.get("service_data")
+                normalized_item.pop("service_data", None)
+
+                # Convert entity_id shorthand into target when target is missing.
+                if "target" not in normalized_item and "entity_id" in normalized_item:
+                    normalized_item["target"] = {"entity_id": normalized_item.get("entity_id")}
+                    normalized_item.pop("entity_id", None)
+
+                target_raw = normalized_item.get("target")
+                if isinstance(target_raw, dict):
+                    target = dict(target_raw)
+                    if "entity_id" in target:
+                        cleaned_entity = self._sanitize_entity_id_field(target.get("entity_id"))
+                        if cleaned_entity is None:
+                            target.pop("entity_id", None)
+                        else:
+                            target["entity_id"] = cleaned_entity
+
+                    if service == "scene.turn_on" and "entity_id" not in target:
+                        guessed_scene = ensure_inferred_scene_id()
+                        if guessed_scene:
+                            target["entity_id"] = guessed_scene
+
+                    if target:
+                        normalized_item["target"] = target
+                    else:
+                        normalized_item.pop("target", None)
+
+                if service == "scene.turn_on" and "target" not in normalized_item:
+                    guessed_scene = ensure_inferred_scene_id()
+                    if guessed_scene:
+                        normalized_item["target"] = {"entity_id": guessed_scene}
+
+                if script_entity_target:
+                    target = normalized_item.get("target")
+                    if not isinstance(target, dict):
+                        target = {}
+                    target_entity = target.get("entity_id")
+                    cleaned_target_entity = self._sanitize_entity_id_field(target_entity)
+                    if cleaned_target_entity is None:
+                        target["entity_id"] = script_entity_target
+                    else:
+                        target["entity_id"] = cleaned_target_entity
+                    normalized_item["target"] = target
+
+                normalized_item = self._sanitize_entity_ids_recursive(normalized_item)
+                if not isinstance(normalized_item, dict) or not normalized_item:
+                    continue
+
+                normalized.append(normalized_item)
 
         if normalized:
             return normalized
@@ -951,6 +1396,71 @@ class AutomationManager:
             return f"{clean_desc} | {generated}"
         return generated
 
+    def _native_match_automation(
+        self,
+        user_text: str,
+        query_name: str,
+        query_content: str,
+        language: str | None = None,
+    ) -> MatchResult | None:
+        candidates = self._managed_automations()
+        if not candidates:
+            return None
+
+        candidate_rows: list[dict[str, str]] = []
+        for item in candidates[:120]:
+            candidate_rows.append(
+                {
+                    "id": str(item.get("id") or item.get("automation_id") or "").strip(),
+                    "name": str(item.get("alias") or item.get("name") or "").strip(),
+                    "summary": self._summarize_automation(item),
+                }
+            )
+
+        request_payload = {
+            "task": "native_match_automation",
+            "user_text": user_text,
+            "query_name": query_name,
+            "query_content": query_content,
+            "candidates": candidate_rows,
+        }
+
+        try:
+            raw = self.client.ask_conversation(json.dumps(request_payload, ensure_ascii=False), language=language)
+        except Exception:
+            return None
+
+        parsed = self._extract_json_block(raw)
+        if not isinstance(parsed, dict):
+            return None
+
+        target_id = str(parsed.get("target_id") or "").strip()
+        confidence_raw = parsed.get("confidence")
+        try:
+            confidence = float(confidence_raw)
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        if not target_id or confidence < 0.45:
+            return None
+
+        chosen = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("id") or item.get("automation_id") or "").strip() == target_id
+            ),
+            None,
+        )
+        if not chosen:
+            return None
+
+        return MatchResult(
+            score=max(0.0, min(1.0, confidence)),
+            automation=chosen,
+            summary=self._summarize_automation(chosen),
+        )
+
     def _fallback_name(self, text: str) -> str:
         normalized = re.sub(r"\s+", " ", str(text or "").strip())
         if not normalized:
@@ -986,7 +1496,9 @@ class AutomationManager:
                 f"{retry_reason}. "
                 "请返回可直接用于 Home Assistant automation YAML 的结果："
                 "trigger 列表每项必须有 trigger 键，time trigger 必须使用 at；"
-                "action 列表每项必须有 action 键并使用 domain.service 格式。"
+                "action 列表每项必须有 action 键并使用 domain.service 格式；"
+                "可操作任意已暴露给语音助手的实体，优先在 action 中提供 target.entity_id（或 entity_id）和 data；"
+                "不要把 domain.service（例如 scene.turn_on）写入 entity_id 字段。"
             )
         raw = self.client.ask_conversation(prompt, language=language)
         parsed = self._extract_json_block(raw) or {}
@@ -1129,10 +1641,11 @@ class AutomationManager:
                 action_raw_any = []
 
             trigger_raw: list[dict[str, Any]] = [item for item in trigger_raw_any if isinstance(item, dict)]
-            condition = [item for item in condition_any if isinstance(item, dict)]
+            condition_raw: list[dict[str, Any]] = [item for item in condition_any if isinstance(item, dict)]
             action_raw: list[dict[str, Any]] = [item for item in action_raw_any if isinstance(item, dict)]
 
             trigger = self._normalize_trigger_list(trigger_raw, text)
+            condition = self._normalize_condition_list(condition_raw)
             action = self._normalize_action_list(action_raw, text)
 
             retry_reason = self._dry_run_validate_payload(trigger, condition, action, mode)
@@ -1142,7 +1655,20 @@ class AutomationManager:
             if attempt >= max_attempts - 1:
                 raise AutomationError(
                     "automation dry-run failed after retries: "
-                    f"{retry_reason}. Please provide a clearer command or adjust the conversation agent prompt."
+                    f"{retry_reason}. Please provide a clearer command or adjust the conversation agent prompt.",
+                    debug={
+                        "phase": "create_dry_run",
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "retry_reason": retry_reason,
+                        "plan": plan,
+                        "normalized": {
+                            "trigger": trigger,
+                            "condition": condition,
+                            "action": action,
+                            "mode": mode,
+                        },
+                    },
                 )
 
         metadata = {
@@ -1211,7 +1737,14 @@ class AutomationManager:
         target_name = str(plan.get("target_name") or "").strip()
         summary = str(plan.get("summary") or "").strip() or str(text).strip()
 
-        match = self._match_automation(query_name=target_name, query_content=summary)
+        match = self._native_match_automation(
+            user_text=text,
+            query_name=target_name,
+            query_content=summary,
+            language=language,
+        )
+        if match is None:
+            match = self._match_automation(query_name=target_name, query_content=summary)
         target = match.automation
 
         target_id = str(target.get("id") or target.get("automation_id") or "").strip()
@@ -1316,15 +1849,59 @@ class AutomationManager:
         current_action = self._entry_actions(current)
 
         trigger = self._normalize_trigger_list(trigger_plan if trigger_plan else current_trigger, input_text)
-        condition = condition_plan if condition_plan else current_condition
+        condition = self._normalize_condition_list(condition_plan if condition_plan else current_condition)
         action = self._normalize_action_list(action_plan if action_plan else current_action, input_text)
         mode = str(plan.get("mode") or "").strip() or str(current.get("mode") or "single")
+
+        behavior_unchanged = (
+            final_name == current_alias
+            and self._json_like_equal(trigger, current_trigger)
+            and self._json_like_equal(condition, current_condition)
+            and self._json_like_equal(action, current_action)
+            and mode == str(current.get("mode") or "single")
+        )
+        if behavior_unchanged:
+            raise AutomationError(
+                "no effective update was detected from this instruction; automation was not changed",
+                debug={
+                    "phase": "update_noop",
+                    "target_id": target_id,
+                    "target_alias": target_alias,
+                    "plan": plan,
+                    "current": {
+                        "name": current_alias,
+                        "trigger": current_trigger,
+                        "condition": current_condition,
+                        "action": current_action,
+                        "mode": str(current.get("mode") or "single"),
+                    },
+                    "normalized": {
+                        "name": final_name,
+                        "trigger": trigger,
+                        "condition": condition,
+                        "action": action,
+                        "mode": mode,
+                    },
+                },
+            )
 
         update_dry_run_error = self._dry_run_validate_payload(trigger, condition, action, mode)
         if update_dry_run_error is not None:
             raise AutomationError(
                 "automation update dry-run failed: "
-                f"{update_dry_run_error}. Please provide clearer update instructions."
+                f"{update_dry_run_error}. Please provide clearer update instructions.",
+                debug={
+                    "phase": "update_dry_run",
+                    "target_id": target_id,
+                    "target_alias": target_alias,
+                    "plan": plan,
+                    "normalized": {
+                        "trigger": trigger,
+                        "condition": condition,
+                        "action": action,
+                        "mode": mode,
+                    },
+                },
             )
 
         updated_meta = {

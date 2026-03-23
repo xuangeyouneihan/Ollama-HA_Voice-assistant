@@ -123,7 +123,14 @@ async def create_automation_from_text(req: CreateAutomationRequest):
         result = manager.create_from_text(text=req.text, language=req.language)
         return result
     except AutomationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail: str | dict[str, object] = str(exc)
+        debug = getattr(exc, "debug", None)
+        if isinstance(debug, dict) and debug:
+            detail = {
+                "message": str(exc),
+                "debug": debug,
+            }
+        raise HTTPException(status_code=400, detail=detail) from exc
     except Exception as exc:
         logger.exception("Failed to create automation from text")
         raise HTTPException(status_code=500, detail=f"internal error: {exc}") from exc
@@ -154,7 +161,14 @@ async def manage_automation_from_text(req: ManageAutomationRequest):
             language=req.language,
         )
     except AutomationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail: str | dict[str, object] = str(exc)
+        debug = getattr(exc, "debug", None)
+        if isinstance(debug, dict) and debug:
+            detail = {
+                "message": str(exc),
+                "debug": debug,
+            }
+        raise HTTPException(status_code=400, detail=detail) from exc
     except HTTPException:
         raise
     except Exception as exc:
