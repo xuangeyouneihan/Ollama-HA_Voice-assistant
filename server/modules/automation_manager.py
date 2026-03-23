@@ -356,6 +356,39 @@ class HomeAssistantAutomationClient:
             exposed[entity_id] = mapped
         return exposed
 
+    def validate_automation_config(
+        self,
+        triggers: list[dict[str, Any]],
+        conditions: list[dict[str, Any]],
+        actions: list[dict[str, Any]],
+    ) -> str | None:
+        result = self._ws_send_command(
+            {
+                "type": "validate_config",
+                "triggers": triggers,
+                "conditions": conditions,
+                "actions": actions,
+            }
+        )
+
+        if not isinstance(result, dict):
+            return "validate_config returned non-object result"
+
+        issues: list[str] = []
+        for key in ("triggers", "conditions", "actions"):
+            part = result.get(key)
+            if not isinstance(part, dict):
+                continue
+            valid = bool(part.get("valid", False))
+            if valid:
+                continue
+            err = str(part.get("error") or "unknown validation error").strip()
+            issues.append(f"{key}: {err}")
+
+        if issues:
+            return "; ".join(issues)
+        return None
+
     def _load_file_automations(self) -> list[dict[str, Any]]:
         try:
             if not os.path.exists(self.automations_path):
@@ -779,6 +812,10 @@ class AutomationManager:
                 return f"action[{idx}] missing required key: action"
             if "." not in action_service:
                 return f"action[{idx}] should be domain.service format"
+
+        ha_validation_error = self.client.validate_automation_config(triggers, conditions, actions)
+        if ha_validation_error:
+            return f"ha validate_config failed: {ha_validation_error}"
 
         return None
 
@@ -1282,6 +1319,13 @@ class AutomationManager:
         condition = condition_plan if condition_plan else current_condition
         action = self._normalize_action_list(action_plan if action_plan else current_action, input_text)
         mode = str(plan.get("mode") or "").strip() or str(current.get("mode") or "single")
+
+        update_dry_run_error = self._dry_run_validate_payload(trigger, condition, action, mode)
+        if update_dry_run_error is not None:
+            raise AutomationError(
+                "automation update dry-run failed: "
+                f"{update_dry_run_error}. Please provide clearer update instructions."
+            )
 
         updated_meta = {
             "ai_generated_name": ai_generated_after,

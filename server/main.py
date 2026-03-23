@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel
 import logging
+from contextlib import asynccontextmanager
 
 from config_loader import get_config
 from modules.automation_manager import AutomationError, AutomationManager
@@ -9,7 +10,6 @@ from modules.ha_fallback import request_ha_with_fallback, run_assist_pipeline_wi
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="HumbleVoice Server (ESP32 Bridge)")
 cfg = get_config()
 audio_cfg = cfg.get("audio", {}) if cfg else {}
 ASSIST_INPUT_SAMPLE_RATE = int(audio_cfg.get("sample_rate", 16000))
@@ -23,8 +23,8 @@ def get_automation_manager() -> AutomationManager:
     return automation_manager
 
 
-@app.on_event("startup")
-async def startup_self_check():
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     try:
         manager = get_automation_manager()
         result = manager.run_conversation_self_check()
@@ -40,6 +40,11 @@ async def startup_self_check():
             logger.warning("Conversation self-check failed: %s", result.get("message"))
     except Exception as exc:
         logger.warning("Conversation self-check skipped due to error: %s", exc)
+
+    yield
+
+
+app = FastAPI(title="HumbleVoice Server (ESP32 Bridge)", lifespan=lifespan)
 
 
 class CreateAutomationRequest(BaseModel):
