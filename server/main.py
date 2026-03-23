@@ -53,8 +53,9 @@ class CreateAutomationRequest(BaseModel):
 
 
 class ManageAutomationRequest(BaseModel):
-    text: str
+    text: str = ""
     expected_operation: str
+    session_id: str
     language: str | None = None
     confirmation_id: str | None = None
     confirm: bool = False
@@ -142,22 +143,21 @@ async def manage_automation_from_text(req: ManageAutomationRequest):
     if op not in {"task_update", "task_delete"}:
         raise HTTPException(status_code=400, detail="expected_operation must be task_update or task_delete")
 
+    session_id = (req.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
     try:
         manager = get_automation_manager()
-        if req.confirm:
+        if req.confirm or req.confirmation_id:
             if not req.confirmation_id:
-                raise HTTPException(status_code=400, detail="confirmation_id required when confirm=true")
-            return manager.confirm_manage(req.confirmation_id)
-
-        if req.confirmation_id:
-            return manager.confirm_manage(req.confirmation_id)
-
-        if manager.is_confirmation_text(req.text):
-            return manager.confirm_latest_manage(op)
+                raise HTTPException(status_code=400, detail="confirmation_id required for confirmation")
+            return manager.confirm_manage(req.confirmation_id, session_id=session_id)
 
         return manager.prepare_manage(
             text=req.text,
             expected_operation=op,
+            session_id=session_id,
             language=req.language,
         )
     except AutomationError as exc:

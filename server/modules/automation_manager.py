@@ -1730,7 +1730,13 @@ class AutomationManager:
             "message": f"已创建自动化: {final_name}",
         }
 
-    def prepare_manage(self, text: str, expected_operation: str, language: str | None = None) -> dict[str, Any]:
+    def prepare_manage(
+        self,
+        text: str,
+        expected_operation: str,
+        session_id: str,
+        language: str | None = None,
+    ) -> dict[str, Any]:
         operation = "update" if expected_operation == "task_update" else "delete"
         plan = self._plan_from_text(operation, text, language=language)
 
@@ -1754,6 +1760,7 @@ class AutomationManager:
 
         payload = {
             "operation": operation,
+            "session_id": str(session_id or "").strip(),
             "target_id": target_id,
             "target_alias": target_alias,
             "target_summary": match.summary,
@@ -1767,6 +1774,7 @@ class AutomationManager:
             "ok": True,
             "needs_confirmation": True,
             "confirmation_id": confirmation_id,
+            "session_id": str(session_id or "").strip(),
             "operation": operation,
             "match_score": round(match.score, 4),
             "target": {
@@ -1780,10 +1788,17 @@ class AutomationManager:
             ),
         }
 
-    def confirm_manage(self, confirmation_id: str) -> dict[str, Any]:
+    def confirm_manage(self, confirmation_id: str, session_id: str) -> dict[str, Any]:
         payload = self.pending.pop(confirmation_id)
         if not payload:
             raise AutomationError("confirmation_id invalid or expired")
+
+        payload_session_id = str(payload.get("session_id") or "").strip()
+        request_session_id = str(session_id or "").strip()
+        if not request_session_id:
+            raise AutomationError("session_id is required for confirmation")
+        if payload_session_id and payload_session_id != request_session_id:
+            raise AutomationError("confirmation_id does not belong to current session")
 
         operation = str(payload.get("operation") or "")
         target_id = str(payload.get("target_id") or "")
@@ -1936,9 +1951,4 @@ class AutomationManager:
         }
 
     def confirm_latest_manage(self, expected_operation: str) -> dict[str, Any]:
-        operation = "update" if expected_operation == "task_update" else "delete"
-        latest = self.pending.pop_latest(operation=operation)
-        if not latest:
-            raise AutomationError("no pending confirmation found")
-        token, _ = latest
-        return self.confirm_manage(token)
+        raise AutomationError("confirm_latest_manage is disabled; use confirmation_id with session_id")
