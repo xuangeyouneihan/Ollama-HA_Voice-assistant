@@ -70,12 +70,21 @@ class PendingActionStore:
             return None
         return dict(item.get("payload") or {})
 
-    def pop_latest(self, operation: str | None = None) -> tuple[str, dict[str, Any]] | None:
+    def pop_latest(
+        self,
+        operation: str | None = None,
+        session_id: str | None = None,
+        resource_type: str | None = None,
+    ) -> tuple[str, dict[str, Any]] | None:
         self._cleanup()
         candidates: list[tuple[str, float, dict[str, Any]]] = []
         for key, item in self._items.items():
             payload = dict(item.get("payload") or {})
             if operation and str(payload.get("operation") or "") != operation:
+                continue
+            if session_id and str(payload.get("session_id") or "") != session_id:
+                continue
+            if resource_type and str(payload.get("resource_type") or "automation") != resource_type:
                 continue
             candidates.append((key, float(item.get("created_at") or 0), payload))
 
@@ -124,14 +133,24 @@ class HomeAssistantAutomationClient:
         )
         self.automations_file = str(ha_cfg.get("automations_file", "automations.yaml")).strip() or "automations.yaml"
         self.automations_path = os.path.join(self.config_dir, self.automations_file)
+        self.scripts_file = str(ha_cfg.get("scripts_file", "scripts.yaml")).strip() or "scripts.yaml"
+        self.scripts_path = os.path.join(self.config_dir, self.scripts_file)
         default_backup_dir = os.path.join(self.config_dir, "backups", "automations")
         self.automation_backup_dir = os.path.abspath(
             str(ha_cfg.get("automation_backup_dir", default_backup_dir)).strip()
         )
+        default_script_backup_dir = os.path.join(self.config_dir, "backups", "scripts")
+        self.script_backup_dir = os.path.abspath(
+            str(ha_cfg.get("script_backup_dir", default_script_backup_dir)).strip()
+        )
         self.automation_backup_keep = int(ha_cfg.get("automation_backup_keep", 20))
+        self.script_backup_keep = int(ha_cfg.get("script_backup_keep", 20))
         self.automation_plan_retry_max = max(0, int(ha_cfg.get("automation_plan_retry_max", 2)))
         self.automation_auto_expose_default = bool(ha_cfg.get("automation_auto_expose_default", True))
         self.manage_only_exposed_automations = bool(ha_cfg.get("manage_only_exposed_automations", True))
+        self.script_plan_retry_max = max(0, int(ha_cfg.get("script_plan_retry_max", 2)))
+        self.script_auto_expose_default = bool(ha_cfg.get("script_auto_expose_default", True))
+        self.manage_only_exposed_scripts = bool(ha_cfg.get("manage_only_exposed_scripts", True))
 
         if not self.token:
             raise AutomationError("home_assistant.token is empty; cannot manage automations")
@@ -189,6 +208,9 @@ class HomeAssistantAutomationClient:
 
     def reload_automations(self):
         self.call_service("automation", "reload", {})
+
+    def reload_scripts(self):
+        self.call_service("script", "reload", {})
 
     def _build_ws_url(self) -> str:
         parsed = urlparse(self.base_url)
@@ -451,6 +473,28 @@ class HomeAssistantAutomationClient:
         except Exception as exc:
             raise AutomationError(f"failed to load automations file {self.automations_path}: {exc}") from exc
 
+    def _load_file_scripts(self) -> dict[str, dict[str, Any]]:
+        try:
+            if not os.path.exists(self.scripts_path):
+                return {}
+
+            with open(self.scripts_path, "r", encoding="utf-8") as f:
+                payload = yaml.safe_load(f)
+
+            if payload is None:
+                return {}
+            if isinstance(payload, dict):
+                result: dict[str, dict[str, Any]] = {}
+                for key, value in payload.items():
+                    if not isinstance(key, str) or not isinstance(value, dict):
+                        continue
+                    result[key] = dict(value)
+                return result
+
+            raise AutomationError("scripts.yaml format is invalid; expected a YAML object")
+        except Exception as exc:
+            raise AutomationError(f"failed to load scripts file {self.scripts_path}: {exc}") from exc
+
     def _save_file_automations(self, automations: list[dict[str, Any]]):
         try:
             os.makedirs(os.path.dirname(self.automations_path), exist_ok=True)
@@ -459,6 +503,15 @@ class HomeAssistantAutomationClient:
                 yaml.safe_dump(automations, f, allow_unicode=True, sort_keys=False)
         except Exception as exc:
             raise AutomationError(f"failed to save automations file {self.automations_path}: {exc}") from exc
+
+    def _save_file_scripts(self, scripts: dict[str, dict[str, Any]]):
+        try:
+            os.makedirs(os.path.dirname(self.scripts_path), exist_ok=True)
+            self._backup_scripts_file_if_needed()
+            with open(self.scripts_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(scripts, f, allow_unicode=True, sort_keys=False)
+        except Exception as exc:
+            raise AutomationError(f"failed to save scripts file {self.scripts_path}: {exc}") from exc
 
     def _backup_automations_file_if_needed(self):
         if not os.path.exists(self.automations_path):
@@ -471,6 +524,17 @@ class HomeAssistantAutomationClient:
         shutil.copy2(self.automations_path, backup_path)
         self._prune_old_backups()
 
+    def _backup_scripts_file_if_needed(self):
+        if not os.path.exists(self.scripts_path):
+            return
+
+        os.makedirs(self.script_backup_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        backup_name = f"scripts.{timestamp}.{uuid.uuid4().hex[:8]}.yaml.bak"
+        backup_path = os.path.join(self.script_backup_dir, backup_name)
+        shutil.copy2(self.scripts_path, backup_path)
+        self._prune_old_script_backups()
+
     def _prune_old_backups(self):
         keep = max(0, int(self.automation_backup_keep))
         if keep <= 0:
@@ -481,6 +545,27 @@ class HomeAssistantAutomationClient:
                 os.path.join(self.automation_backup_dir, name)
                 for name in os.listdir(self.automation_backup_dir)
                 if name.startswith("automations.") and name.endswith(".yaml.bak")
+            ]
+        except FileNotFoundError:
+            return
+
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for old_file in files[keep:]:
+            try:
+                os.remove(old_file)
+            except FileNotFoundError:
+                continue
+
+    def _prune_old_script_backups(self):
+        keep = max(0, int(self.script_backup_keep))
+        if keep <= 0:
+            return
+
+        try:
+            files = [
+                os.path.join(self.script_backup_dir, name)
+                for name in os.listdir(self.script_backup_dir)
+                if name.startswith("scripts.") and name.endswith(".yaml.bak")
             ]
         except FileNotFoundError:
             return
@@ -584,6 +669,102 @@ class HomeAssistantAutomationClient:
         if len(filtered) == before:
             raise AutomationError(f"failed to delete automation {automation_id}: not found in {self.automations_path}")
         self._save_file_automations(filtered)
+
+    def list_scripts(self) -> list[dict[str, Any]]:
+        scripts = self._load_file_scripts()
+        rows: list[dict[str, Any]] = []
+        for script_id, payload in scripts.items():
+            row = dict(payload)
+            row["script_id"] = script_id
+            rows.append(row)
+        return rows
+
+    def create_script(self, script_data: dict[str, Any]) -> dict[str, Any]:
+        scripts = self._load_file_scripts()
+        alias = str(script_data.get("alias") or "").strip()
+        requested_id = str(script_data.get("script_id") or "").strip()
+        base_id = self._slugify_name(requested_id or alias)
+        if not base_id:
+            base_id = f"hv_script_{int(time.time())}"
+
+        script_id = base_id
+        suffix = 2
+        while script_id in scripts:
+            script_id = f"{base_id}_{suffix}"
+            suffix += 1
+
+        sequence = script_data.get("sequence")
+        if not isinstance(sequence, list):
+            sequence = []
+
+        new_item = {
+            "alias": alias or script_id,
+            "description": str(script_data.get("description") or "").strip(),
+            "sequence": sequence,
+            "mode": str(script_data.get("mode") or "single").strip() or "single",
+        }
+        scripts[script_id] = new_item
+        self._save_file_scripts(scripts)
+
+        result = dict(new_item)
+        result["script_id"] = script_id
+        return result
+
+    def update_script(self, script_id: str, script_data: dict[str, Any]) -> dict[str, Any]:
+        scripts = self._load_file_scripts()
+        if script_id not in scripts:
+            raise AutomationError(f"failed to update script {script_id}: not found in {self.scripts_path}")
+
+        current = dict(scripts.get(script_id) or {})
+        updated = dict(current)
+        updated["alias"] = str(script_data.get("alias") or updated.get("alias") or script_id).strip()
+        updated["description"] = str(script_data.get("description") or updated.get("description") or "").strip()
+
+        sequence = script_data.get("sequence")
+        if isinstance(sequence, list):
+            updated["sequence"] = sequence
+
+        updated["mode"] = str(script_data.get("mode") or updated.get("mode") or "single").strip() or "single"
+        scripts[script_id] = updated
+        self._save_file_scripts(scripts)
+
+        result = dict(updated)
+        result["script_id"] = script_id
+        return result
+
+    def delete_script(self, script_id: str):
+        scripts = self._load_file_scripts()
+        if script_id not in scripts:
+            raise AutomationError(f"failed to delete script {script_id}: not found in {self.scripts_path}")
+        scripts.pop(script_id, None)
+        self._save_file_scripts(scripts)
+
+    def resolve_script_entity_id(self, script_id: str, alias: str) -> str | None:
+        states = self._request_json("GET", "/api/states")
+        if not isinstance(states, list):
+            return None
+
+        candidates = [s for s in states if isinstance(s, dict) and str(s.get("entity_id") or "").startswith("script.")]
+        if not candidates:
+            return None
+
+        script_id_clean = str(script_id or "").strip()
+        if script_id_clean:
+            direct = f"script.{script_id_clean}"
+            for item in candidates:
+                entity_id = str(item.get("entity_id") or "").strip()
+                if entity_id == direct:
+                    return entity_id
+
+        target_alias = str(alias or "").strip()
+        if target_alias:
+            for item in candidates:
+                attrs_raw = item.get("attributes")
+                attrs: dict[str, Any] = attrs_raw if isinstance(attrs_raw, dict) else {}
+                if str(attrs.get("friendly_name") or "").strip() == target_alias:
+                    return str(item.get("entity_id") or "").strip() or None
+
+        return None
 
     def ask_conversation(self, prompt: str, language: str | None = None) -> str:
         body: dict[str, Any] = {
@@ -760,6 +941,13 @@ class AutomationManager:
         if isinstance(value, list):
             return [v for v in value if isinstance(v, dict)]
         value = entry.get("action")
+        if isinstance(value, list):
+            return [v for v in value if isinstance(v, dict)]
+        return []
+
+    @staticmethod
+    def _entry_sequence(entry: dict[str, Any]) -> list[dict[str, Any]]:
+        value = entry.get("sequence")
         if isinstance(value, list):
             return [v for v in value if isinstance(v, dict)]
         return []
@@ -985,6 +1173,40 @@ class AutomationManager:
         ha_validation_error = self.client.validate_automation_config(triggers, conditions, actions)
         if ha_validation_error:
             return f"ha validate_config failed: {ha_validation_error}"
+
+        return None
+
+    def _dry_run_validate_script_payload(
+        self,
+        sequence: list[dict[str, Any]],
+        mode: str,
+    ) -> str | None:
+        if not sequence:
+            return "missing sequence"
+
+        allowed_modes = {"single", "restart", "queued", "parallel"}
+        if mode not in allowed_modes:
+            return f"invalid mode: {mode}"
+
+        for idx, step in enumerate(sequence):
+            if not isinstance(step, dict):
+                return f"sequence[{idx}] is not an object"
+            action_service = str(step.get("action") or "").strip()
+            if not action_service:
+                return f"sequence[{idx}] missing required key: action"
+            if "." not in action_service:
+                return f"sequence[{idx}] should be domain.service format"
+
+        known_entities = self.client.list_state_entity_ids()
+        referenced = self._collect_entity_ids_from_value([sequence])
+        referenced = {entity for entity in referenced if entity not in {"all", "none"}}
+        unknown = sorted(entity for entity in referenced if entity not in known_entities)
+        if unknown:
+            return "referenced entities not found in Home Assistant states: " + ", ".join(unknown)
+
+        exposure_error = self._validate_entities_exposed([], [], sequence)
+        if exposure_error:
+            return exposure_error
 
         return None
 
@@ -1313,6 +1535,16 @@ class AutomationManager:
         mode = str(automation.get("mode") or "")
         return " ".join([alias, clean_desc, summary, trigger, condition, action, mode]).strip()
 
+    def _script_content_text(self, script: dict[str, Any]) -> str:
+        script_id = str(script.get("script_id") or "")
+        alias = str(script.get("alias") or script_id)
+        description = str(script.get("description") or "")
+        clean_desc, meta = self._strip_meta(description)
+        summary = str(meta.get("summary") or "")
+        sequence = json.dumps(self._entry_sequence(script), ensure_ascii=False)
+        mode = str(script.get("mode") or "")
+        return " ".join([script_id, alias, clean_desc, summary, sequence, mode]).strip()
+
     def _managed_automations(self) -> list[dict[str, Any]]:
         automations = self.client.list_automations()
         if not automations:
@@ -1330,6 +1562,30 @@ class AutomationManager:
             automation_id = str(item.get("id") or item.get("automation_id") or "").strip()
             alias = str(item.get("alias") or item.get("name") or "").strip()
             entity_id = self.client.resolve_automation_entity_id(automation_id=automation_id, alias=alias)
+            if not entity_id:
+                continue
+            flags = exposed_map.get(entity_id)
+            if isinstance(flags, dict) and bool(flags.get("conversation", False)):
+                managed.append(item)
+        return managed
+
+    def _managed_scripts(self) -> list[dict[str, Any]]:
+        scripts = self.client.list_scripts()
+        if not scripts:
+            return []
+
+        if not self.client.manage_only_exposed_scripts:
+            return scripts
+
+        exposed_map = self.client.list_exposed_entities()
+        if not exposed_map:
+            return []
+
+        managed: list[dict[str, Any]] = []
+        for item in scripts:
+            script_id = str(item.get("script_id") or "").strip()
+            alias = str(item.get("alias") or script_id).strip()
+            entity_id = self.client.resolve_script_entity_id(script_id=script_id, alias=alias)
             if not entity_id:
                 continue
             flags = exposed_map.get(entity_id)
@@ -1396,6 +1652,129 @@ class AutomationManager:
             return f"{clean_desc} | {generated}"
         return generated
 
+    def _summarize_script(self, script: dict[str, Any]) -> str:
+        description = str(script.get("description") or "")
+        clean_desc, meta = self._strip_meta(description)
+        summary = str(meta.get("summary") or "").strip()
+        if summary:
+            return summary
+
+        sequence = self._entry_sequence(script)
+        sequence_brief = json.dumps(sequence[:1], ensure_ascii=False)
+        generated = f"步骤: {sequence_brief}"
+        if clean_desc:
+            return f"{clean_desc} | {generated}"
+        return generated
+
+    def _match_script(self, query_name: str, query_content: str) -> MatchResult:
+        scripts = self._managed_scripts()
+        if not scripts:
+            if self.client.manage_only_exposed_scripts:
+                raise AutomationError("no script exposed to Assist is available for management")
+            raise AutomationError("no script found in Home Assistant")
+
+        qn = self._normalize_text(query_name)
+        qc = self._normalize_text(query_content)
+
+        best: MatchResult | None = None
+        for item in scripts:
+            script_id = str(item.get("script_id") or "")
+            alias = str(item.get("alias") or script_id)
+            name_norm = self._normalize_text(" ".join([alias, script_id]))
+            content_norm = self._normalize_text(self._script_content_text(item))
+
+            name_score = max(self._sequence_score(qn, name_norm), self._token_overlap_score(qn, name_norm))
+            content_score = max(
+                self._sequence_score(qc, content_norm),
+                self._token_overlap_score(qc, content_norm),
+            )
+            if not qn:
+                name_score = 0.0
+            if not qc:
+                content_score = 0.0
+
+            combined = 0.55 * name_score + 0.45 * content_score
+            if not qn and qc:
+                combined = content_score
+            if qn and not qc:
+                combined = name_score
+            if not qn and not qc:
+                combined = self._sequence_score(self._normalize_text(query_content), content_norm)
+
+            summary = self._summarize_script(item)
+            current = MatchResult(score=combined, automation=item, summary=summary)
+            if best is None or current.score > best.score:
+                best = current
+
+        if best is None:
+            raise AutomationError("failed to match script")
+        return best
+
+    def _native_match_script(
+        self,
+        user_text: str,
+        query_name: str,
+        query_content: str,
+        language: str | None = None,
+    ) -> MatchResult | None:
+        candidates = self._managed_scripts()
+        if not candidates:
+            return None
+
+        candidate_rows: list[dict[str, str]] = []
+        for item in candidates[:120]:
+            candidate_rows.append(
+                {
+                    "id": str(item.get("script_id") or "").strip(),
+                    "name": str(item.get("alias") or item.get("script_id") or "").strip(),
+                    "summary": self._summarize_script(item),
+                }
+            )
+
+        request_payload = {
+            "task": "native_match_script",
+            "user_text": user_text,
+            "query_name": query_name,
+            "query_content": query_content,
+            "candidates": candidate_rows,
+        }
+
+        try:
+            raw = self.client.ask_conversation(json.dumps(request_payload, ensure_ascii=False), language=language)
+        except Exception:
+            return None
+
+        parsed = self._extract_json_block(raw)
+        if not isinstance(parsed, dict):
+            return None
+
+        target_id = str(parsed.get("target_id") or "").strip()
+        confidence_raw = parsed.get("confidence")
+        try:
+            confidence = float(str(confidence_raw))
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        if not target_id or confidence < 0.45:
+            return None
+
+        chosen = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("script_id") or "").strip() == target_id
+            ),
+            None,
+        )
+        if not chosen:
+            return None
+
+        return MatchResult(
+            score=max(0.0, min(1.0, confidence)),
+            automation=chosen,
+            summary=self._summarize_script(chosen),
+        )
+
     def _native_match_automation(
         self,
         user_text: str,
@@ -1437,7 +1816,7 @@ class AutomationManager:
         target_id = str(parsed.get("target_id") or "").strip()
         confidence_raw = parsed.get("confidence")
         try:
-            confidence = float(confidence_raw)
+            confidence = float(str(confidence_raw))
         except (TypeError, ValueError):
             confidence = 0.0
 
@@ -1527,6 +1906,62 @@ class AutomationManager:
         }
         return result
 
+    def _plan_script_from_text(
+        self,
+        operation: str,
+        text: str,
+        language: str | None = None,
+        retry_reason: str | None = None,
+    ) -> dict[str, Any]:
+        prompt = (
+            "你是 Home Assistant 脚本规划器。"
+            "请将用户需求转换成 JSON。"
+            "仅输出 JSON，不要输出其他文字。"
+            "JSON schema: "
+            "{"
+            '"target_name":"string or empty",'
+            '"new_name":"string or empty",'
+            '"name_specified":true|false,'
+            '"summary":"string",'
+            '"expose_to_assist":true|false|empty,'
+            '"sequence":[],"mode":"single|restart|queued|parallel|empty"'
+            "}."
+            f"operation={operation}; user_text={text}"
+        )
+        if retry_reason:
+            prompt += (
+                " 上一次输出未通过校验，原因是: "
+                f"{retry_reason}. "
+                "请返回可直接用于 Home Assistant script YAML 的结果："
+                "sequence 列表每项必须有 action 键并使用 domain.service 格式；"
+                "优先在步骤中提供 target.entity_id（或 entity_id）和 data；"
+                "不要把 domain.service（例如 light.turn_on）写入 entity_id 字段。"
+            )
+        raw = self.client.ask_conversation(prompt, language=language)
+        parsed = self._extract_json_block(raw) or {}
+
+        if not parsed:
+            if self.client.uses_default_conversation_agent:
+                raise AutomationError(
+                    "default conversation agent cannot produce structured planning JSON for this request. "
+                    "Please configure home_assistant.automation_conversation_agent to an LLM-capable agent."
+                )
+            raise AutomationError(
+                "conversation agent did not return structured JSON for script planning. "
+                "Please configure home_assistant.automation_conversation_agent to an LLM-capable agent."
+            )
+
+        result = {
+            "target_name": str(parsed.get("target_name") or "").strip(),
+            "new_name": str(parsed.get("new_name") or parsed.get("target_name") or "").strip(),
+            "name_specified": bool(parsed.get("name_specified", False)),
+            "summary": str(parsed.get("summary") or "").strip(),
+            "expose_to_assist": parsed.get("expose_to_assist"),
+            "sequence": parsed.get("sequence") if isinstance(parsed.get("sequence"), list) else [],
+            "mode": str(parsed.get("mode") or "").strip(),
+        }
+        return result
+
     def _wants_no_expose_from_text(self, text: str) -> bool:
         raw = str(text or "").strip().lower()
         if not raw:
@@ -1563,6 +1998,21 @@ class AutomationManager:
         if self._wants_no_expose_from_text(text):
             return False
         return self.client.automation_auto_expose_default
+
+    def _resolve_script_expose_preference(self, text: str, plan: dict[str, Any]) -> bool:
+        expose_raw = plan.get("expose_to_assist")
+        if isinstance(expose_raw, bool):
+            return expose_raw
+        if isinstance(expose_raw, str):
+            value = expose_raw.strip().lower()
+            if value in {"true", "yes", "1", "on"}:
+                return True
+            if value in {"false", "no", "0", "off"}:
+                return False
+
+        if self._wants_no_expose_from_text(text):
+            return False
+        return self.client.script_auto_expose_default
 
     def _generate_name(self, summary: str, text: str, language: str | None = None) -> str:
         prompt = (
@@ -1730,6 +2180,115 @@ class AutomationManager:
             "message": f"已创建自动化: {final_name}",
         }
 
+    def create_script_from_text(self, text: str, language: str | None = None) -> dict[str, Any]:
+        max_attempts = self.client.script_plan_retry_max + 1
+        retry_reason: str | None = None
+        plan: dict[str, Any] = {}
+
+        final_name = ""
+        ai_generated_name = False
+        summary = ""
+        mode = "single"
+        sequence: list[dict[str, Any]] = []
+
+        for attempt in range(max_attempts):
+            plan = self._plan_script_from_text("create", text, language=language, retry_reason=retry_reason)
+            name_specified = bool(plan.get("name_specified"))
+            requested_name = str(plan.get("new_name") or plan.get("target_name") or "").strip()
+            summary = str(plan.get("summary") or "").strip() or str(text).strip()
+
+            ai_generated_name = False
+            if name_specified and requested_name:
+                final_name = requested_name
+            else:
+                final_name = self._generate_name(summary=summary, text=text, language=language)
+                ai_generated_name = True
+
+            mode = str(plan.get("mode") or "").strip() or "single"
+            sequence_raw_any = plan.get("sequence")
+            if not isinstance(sequence_raw_any, list):
+                sequence_raw_any = []
+            sequence_raw: list[dict[str, Any]] = [item for item in sequence_raw_any if isinstance(item, dict)]
+            sequence = self._normalize_action_list(sequence_raw, text)
+
+            retry_reason = self._dry_run_validate_script_payload(sequence, mode)
+            if retry_reason is None:
+                break
+
+            if attempt >= max_attempts - 1:
+                raise AutomationError(
+                    "script dry-run failed after retries: "
+                    f"{retry_reason}. Please provide a clearer command or adjust the conversation agent prompt.",
+                    debug={
+                        "phase": "create_script_dry_run",
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "retry_reason": retry_reason,
+                        "plan": plan,
+                        "normalized": {
+                            "sequence": sequence,
+                            "mode": mode,
+                        },
+                    },
+                )
+
+        metadata = {
+            "ai_generated_name": ai_generated_name,
+            "summary": summary,
+            "updated_at": int(time.time()),
+        }
+        description = self._build_description("", metadata)
+
+        payload = {
+            "alias": final_name,
+            "description": description,
+            "sequence": sequence,
+            "mode": mode,
+        }
+
+        created = self.client.create_script(payload)
+        self.client.reload_scripts()
+
+        script_id = str(created.get("script_id") or "").strip()
+        should_expose = self._resolve_script_expose_preference(text=text, plan=plan)
+        exposed_to_assist: bool | None = None
+        exposure_warning = ""
+        exposed_entity_id = ""
+
+        if should_expose:
+            try:
+                exposed_entity_id = str(
+                    self.client.resolve_script_entity_id(script_id=script_id, alias=final_name) or ""
+                ).strip()
+                if not exposed_entity_id:
+                    raise AutomationError("script entity_id was not found after reload")
+                self.client.set_entity_exposed_to_conversation(exposed_entity_id, should_expose=True)
+                exposed_to_assist = True
+            except Exception as exc:
+                exposed_to_assist = False
+                exposure_warning = f"created but failed to expose to Assist: {exc}"
+                logger.warning(exposure_warning)
+        else:
+            exposed_to_assist = False
+
+        if self.client.manage_only_exposed_scripts and not exposed_to_assist:
+            raise AutomationError(
+                "script created but not exposed to Assist; policy blocks managing non-exposed scripts"
+            )
+
+        return {
+            "ok": True,
+            "operation": "create_script",
+            "script_id": script_id,
+            "name": final_name,
+            "ai_generated_name": ai_generated_name,
+            "summary": summary,
+            "assist_exposed": exposed_to_assist,
+            "assist_entity_id": exposed_entity_id,
+            "assist_exposure_warning": exposure_warning,
+            "message": f"已创建脚本: {final_name}",
+        }
+
     def prepare_manage(
         self,
         text: str,
@@ -1759,6 +2318,7 @@ class AutomationManager:
             raise AutomationError("matched automation has no id")
 
         payload = {
+            "resource_type": "automation",
             "operation": operation,
             "session_id": str(session_id or "").strip(),
             "target_id": target_id,
@@ -1792,6 +2352,10 @@ class AutomationManager:
         payload = self.pending.pop(confirmation_id)
         if not payload:
             raise AutomationError("confirmation_id invalid or expired")
+
+        payload_type = str(payload.get("resource_type") or "automation").strip()
+        if payload_type != "automation":
+            raise AutomationError("confirmation_id is not for automation operation")
 
         payload_session_id = str(payload.get("session_id") or "").strip()
         request_session_id = str(session_id or "").strip()
@@ -1950,5 +2514,264 @@ class AutomationManager:
             "message": f"已更新自动化: {current_alias} -> {final_name}",
         }
 
-    def confirm_latest_manage(self, expected_operation: str) -> dict[str, Any]:
-        raise AutomationError("confirm_latest_manage is disabled; use confirmation_id with session_id")
+    def prepare_manage_script(
+        self,
+        text: str,
+        expected_operation: str,
+        session_id: str,
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        operation = "update" if expected_operation == "task_update" else "delete"
+        plan = self._plan_script_from_text(operation, text, language=language)
+
+        target_name = str(plan.get("target_name") or "").strip()
+        summary = str(plan.get("summary") or "").strip() or str(text).strip()
+
+        match = self._native_match_script(
+            user_text=text,
+            query_name=target_name,
+            query_content=summary,
+            language=language,
+        )
+        if match is None:
+            match = self._match_script(query_name=target_name, query_content=summary)
+        target = match.automation
+
+        target_id = str(target.get("script_id") or "").strip()
+        target_alias = str(target.get("alias") or target_id).strip()
+        if not target_id:
+            raise AutomationError("matched script has no script_id")
+
+        payload = {
+            "resource_type": "script",
+            "operation": operation,
+            "session_id": str(session_id or "").strip(),
+            "target_id": target_id,
+            "target_alias": target_alias,
+            "target_summary": match.summary,
+            "plan": plan,
+            "input_text": text,
+            "language": language or self.client.conversation_language,
+        }
+        confirmation_id = self.pending.put(payload)
+
+        return {
+            "ok": True,
+            "needs_confirmation": True,
+            "confirmation_id": confirmation_id,
+            "session_id": str(session_id or "").strip(),
+            "operation": operation,
+            "resource_type": "script",
+            "match_score": round(match.score, 4),
+            "target": {
+                "id": target_id,
+                "name": target_alias,
+                "summary": match.summary,
+            },
+            "message": (
+                f"请确认{operation}脚本: 目标是【{target_alias}】, 内容概述: {match.summary}. "
+                f"若确认，请再次调用并携带 confirmation_id={confirmation_id}。"
+            ),
+        }
+
+    def confirm_manage_script(self, confirmation_id: str, session_id: str) -> dict[str, Any]:
+        payload = self.pending.pop(confirmation_id)
+        if not payload:
+            raise AutomationError("confirmation_id invalid or expired")
+
+        payload_type = str(payload.get("resource_type") or "").strip()
+        if payload_type != "script":
+            raise AutomationError("confirmation_id is not for script operation")
+
+        payload_session_id = str(payload.get("session_id") or "").strip()
+        request_session_id = str(session_id or "").strip()
+        if not request_session_id:
+            raise AutomationError("session_id is required for confirmation")
+        if payload_session_id and payload_session_id != request_session_id:
+            raise AutomationError("confirmation_id does not belong to current session")
+
+        operation = str(payload.get("operation") or "")
+        target_id = str(payload.get("target_id") or "")
+        target_alias = str(payload.get("target_alias") or "")
+        plan_raw = payload.get("plan")
+        plan: dict[str, Any] = plan_raw if isinstance(plan_raw, dict) else {}
+        input_text = str(payload.get("input_text") or "")
+        language = str(payload.get("language") or self.client.conversation_language)
+
+        if operation == "delete":
+            self.client.delete_script(target_id)
+            self.client.reload_scripts()
+            return {
+                "ok": True,
+                "operation": "delete_script",
+                "script_id": target_id,
+                "name": target_alias,
+                "message": f"已删除脚本: {target_alias}",
+            }
+
+        if operation != "update":
+            raise AutomationError(f"unsupported pending operation: {operation}")
+
+        all_items = self._managed_scripts()
+        current = next(
+            (
+                item
+                for item in all_items
+                if str(item.get("script_id") or "") == target_id
+            ),
+            None,
+        )
+        if not current:
+            raise AutomationError("target script not found before update")
+
+        current_alias = str(current.get("alias") or target_id).strip()
+        current_description = str(current.get("description") or "")
+        clean_desc, meta = self._strip_meta(current_description)
+        ai_generated_before = bool(meta.get("ai_generated_name", False))
+
+        name_specified = bool(plan.get("name_specified", False))
+        requested_name = str(plan.get("new_name") or "").strip()
+        summary = str(plan.get("summary") or "").strip() or input_text
+
+        ai_generated_after = ai_generated_before
+        if name_specified and requested_name:
+            final_name = requested_name
+            if ai_generated_before:
+                ai_generated_after = False
+        elif ai_generated_before:
+            final_name = self._generate_name(summary=summary, text=input_text, language=language)
+            ai_generated_after = True
+        else:
+            final_name = current_alias
+
+        sequence_plan = plan.get("sequence") if isinstance(plan.get("sequence"), list) and plan.get("sequence") else []
+        current_sequence = self._entry_sequence(current)
+        sequence = self._normalize_action_list(sequence_plan if sequence_plan else current_sequence, input_text)
+        mode = str(plan.get("mode") or "").strip() or str(current.get("mode") or "single")
+
+        behavior_unchanged = (
+            final_name == current_alias
+            and self._json_like_equal(sequence, current_sequence)
+            and mode == str(current.get("mode") or "single")
+        )
+        if behavior_unchanged:
+            raise AutomationError(
+                "no effective update was detected from this instruction; script was not changed",
+                debug={
+                    "phase": "update_script_noop",
+                    "target_id": target_id,
+                    "target_alias": target_alias,
+                    "plan": plan,
+                    "current": {
+                        "name": current_alias,
+                        "sequence": current_sequence,
+                        "mode": str(current.get("mode") or "single"),
+                    },
+                    "normalized": {
+                        "name": final_name,
+                        "sequence": sequence,
+                        "mode": mode,
+                    },
+                },
+            )
+
+        update_dry_run_error = self._dry_run_validate_script_payload(sequence, mode)
+        if update_dry_run_error is not None:
+            raise AutomationError(
+                "script update dry-run failed: "
+                f"{update_dry_run_error}. Please provide clearer update instructions.",
+                debug={
+                    "phase": "update_script_dry_run",
+                    "target_id": target_id,
+                    "target_alias": target_alias,
+                    "plan": plan,
+                    "normalized": {
+                        "sequence": sequence,
+                        "mode": mode,
+                    },
+                },
+            )
+
+        updated_meta = {
+            "ai_generated_name": ai_generated_after,
+            "summary": summary,
+            "updated_at": int(time.time()),
+        }
+        description = self._build_description(clean_desc, updated_meta)
+
+        update_payload = {
+            "alias": final_name,
+            "description": description,
+            "sequence": sequence,
+            "mode": mode,
+        }
+
+        self.client.update_script(target_id, update_payload)
+        self.client.reload_scripts()
+
+        return {
+            "ok": True,
+            "operation": "update_script",
+            "script_id": target_id,
+            "old_name": current_alias,
+            "name": final_name,
+            "ai_generated_name": ai_generated_after,
+            "summary": summary,
+            "message": f"已更新脚本: {current_alias} -> {final_name}",
+        }
+
+    def confirm_latest_manage(self, session_id: str, expected_operation: str | None = None) -> dict[str, Any]:
+        session = str(session_id or "").strip()
+        if not session:
+            raise AutomationError("session_id is required for confirmation")
+
+        operation: str | None = None
+        if expected_operation:
+            op_raw = str(expected_operation or "").strip()
+            if op_raw == "task_update":
+                operation = "update"
+            elif op_raw == "task_delete":
+                operation = "delete"
+            else:
+                raise AutomationError("expected_operation must be task_update or task_delete")
+
+        latest = self.pending.pop_latest(
+            operation=operation,
+            session_id=session,
+            resource_type="automation",
+        )
+        if not latest:
+            if operation:
+                raise AutomationError("no pending automation confirmation found for current session and operation")
+            raise AutomationError("no pending automation confirmation found for current session")
+
+        token, _ = latest
+        return self.confirm_manage(token, session_id=session)
+
+    def confirm_latest_manage_script(self, session_id: str, expected_operation: str | None = None) -> dict[str, Any]:
+        session = str(session_id or "").strip()
+        if not session:
+            raise AutomationError("session_id is required for confirmation")
+
+        operation: str | None = None
+        if expected_operation:
+            op_raw = str(expected_operation or "").strip()
+            if op_raw == "task_update":
+                operation = "update"
+            elif op_raw == "task_delete":
+                operation = "delete"
+            else:
+                raise AutomationError("expected_operation must be task_update or task_delete")
+
+        latest = self.pending.pop_latest(
+            operation=operation,
+            session_id=session,
+            resource_type="script",
+        )
+        if not latest:
+            if operation:
+                raise AutomationError("no pending script confirmation found for current session and operation")
+            raise AutomationError("no pending script confirmation found for current session")
+
+        token, _ = latest
+        return self.confirm_manage_script(token, session_id=session)

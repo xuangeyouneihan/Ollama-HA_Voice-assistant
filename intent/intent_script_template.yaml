@@ -8,14 +8,17 @@
 # - HVCreateAutomation
 # - HVUpdateAutomation
 # - HVDeleteAutomation
+# - HVCreateScript
+# - HVUpdateScript
+# - HVDeleteScript
+# - HVConfirmAutomationManage
+# - HVConfirmScriptManage
 #
 # Two-step behavior for update/delete:
 # 1) First call to manage endpoint returns a confirmation message and a pending action.
-# 2) User says a confirmation phrase (e.g. "确认", "确定", "confirm").
-# 3) Backend confirms the latest pending action for that operation.
-#
-# Optional: if your client can pass confirmation_id, call manage endpoint with:
-#   {"confirmation_id": "...", "confirm": true, "expected_operation": "task_update|task_delete"}
+# 2) Save confirmation_id from response.
+# 3) Call the same manage endpoint again with:
+#    {"confirmation_id":"...", "confirm":true, "session_id":"same-as-step1", "expected_operation":"task_update|task_delete"}
 
 intent_script:
   HVCreateAutomation:
@@ -42,6 +45,42 @@ intent_script:
         data:
           text: "{{ text }}"
 
+  HVCreateScript:
+    speech:
+      text: "Okay, I will create that script."
+    action:
+      - service: rest_command.hv_script_create
+        data:
+          text: "{{ text }}"
+
+  HVUpdateScript:
+    speech:
+      text: "Okay, I will update that script."
+    action:
+      - service: rest_command.hv_script_manage_update
+        data:
+          text: "{{ text }}"
+
+  HVDeleteScript:
+    speech:
+      text: "Okay, I will delete that script."
+    action:
+      - service: rest_command.hv_script_manage_delete
+        data:
+          text: "{{ text }}"
+
+  HVConfirmAutomationManage:
+    speech:
+      text: "Okay, I will confirm the pending automation operation."
+    action:
+      - service: rest_command.hv_task_confirm
+
+  HVConfirmScriptManage:
+    speech:
+      text: "Okay, I will confirm the pending script operation."
+    action:
+      - service: rest_command.hv_script_confirm
+
 # Optional: matching rest_command template (put in configuration.yaml)
 # rest_command:
 #   hv_task_create:
@@ -54,10 +93,40 @@ intent_script:
 #     url: "http://<SERVER_IP>:8000/ha-tasks/manage-from-text"
 #     method: POST
 #     content_type: "application/json"
-#     payload: '{"text": "{{ text }}", "expected_operation": "task_update"}'
+#     payload: '{"text": "{{ text }}", "expected_operation": "task_update", "session_id": "ha_assist"}'
 #
 #   hv_task_manage_delete:
 #     url: "http://<SERVER_IP>:8000/ha-tasks/manage-from-text"
 #     method: POST
 #     content_type: "application/json"
-#     payload: '{"text": "{{ text }}", "expected_operation": "task_delete"}'
+#     payload: '{"text": "{{ text }}", "expected_operation": "task_delete", "session_id": "ha_assist"}'
+#
+#   hv_script_create:
+#     url: "http://<SERVER_IP>:8000/ha-scripts/from-text"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"text": "{{ text }}"}'
+#
+#   hv_script_manage_update:
+#     url: "http://<SERVER_IP>:8000/ha-scripts/manage-from-text"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"text": "{{ text }}", "expected_operation": "task_update", "session_id": "ha_assist"}'
+#
+#   hv_script_manage_delete:
+#     url: "http://<SERVER_IP>:8000/ha-scripts/manage-from-text"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"text": "{{ text }}", "expected_operation": "task_delete", "session_id": "ha_assist"}'
+#
+#   hv_task_confirm:
+#     url: "http://<SERVER_IP>:8000/ha-tasks/confirm"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"session_id": "ha_assist"}'
+#
+#   hv_script_confirm:
+#     url: "http://<SERVER_IP>:8000/ha-scripts/confirm"
+#     method: POST
+#     content_type: "application/json"
+#     payload: '{"session_id": "ha_assist"}'

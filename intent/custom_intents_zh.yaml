@@ -4,6 +4,11 @@
 # - HVCreateAutomation
 # - HVUpdateAutomation
 # - HVDeleteAutomation
+# - HVCreateScript
+# - HVUpdateScript
+# - HVDeleteScript
+# - HVConfirmAutomationManage
+# - HVConfirmScriptManage
 
 language: "zh"
 intents:
@@ -57,6 +62,49 @@ intents:
           - "删除定时任务 {text}"
           - "停止定时任务 {text}"
           - "禁用定时任务 {text}"
+
+  HVCreateScript:
+    data:
+      - sentences:
+          - "创建脚本 {text}"
+          - "新建脚本 {text}"
+          - "帮我创建脚本 {text}"
+          - "添加脚本 {text}"
+          - "请创建脚本 {text}"
+
+  HVUpdateScript:
+    data:
+      - sentences:
+          - "修改脚本 {text}"
+          - "更新脚本 {text}"
+          - "帮我修改脚本 {text}"
+          - "编辑脚本 {text}"
+          - "把脚本改成 {text}"
+
+  HVDeleteScript:
+    data:
+      - sentences:
+          - "删除脚本 {text}"
+          - "移除脚本 {text}"
+          - "帮我删除脚本 {text}"
+          - "取消脚本 {text}"
+          - "禁用脚本 {text}"
+
+  HVConfirmAutomationManage:
+    data:
+      - sentences:
+          - "确认自动化操作"
+          - "确认自动化修改"
+          - "确认自动化删除"
+          - "确认刚才的自动化操作"
+
+  HVConfirmScriptManage:
+    data:
+      - sentences:
+          - "确认脚本操作"
+          - "确认脚本修改"
+          - "确认脚本删除"
+          - "确认刚才的脚本操作"
 
 lists:
   # Optional placeholder for future slot normalization

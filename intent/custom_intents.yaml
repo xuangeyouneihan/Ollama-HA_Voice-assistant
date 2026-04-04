@@ -44,6 +44,46 @@ intents:
           - "cancel scheduled task {text}"
           - "disable planned task {text}"
 
+  HVCreateScript:
+    data:
+      - sentences:
+          - "create a script {text}"
+          - "help me create a script {text}"
+          - "add a script {text}"
+          - "make a script {text}"
+
+  HVUpdateScript:
+    data:
+      - sentences:
+          - "update script {text}"
+          - "modify script {text}"
+          - "edit script {text}"
+          - "change script to {text}"
+
+  HVDeleteScript:
+    data:
+      - sentences:
+          - "delete script {text}"
+          - "remove script {text}"
+          - "cancel script {text}"
+          - "disable script {text}"
+
+  HVConfirmAutomationManage:
+    data:
+      - sentences:
+          - "confirm automation operation"
+          - "confirm automation update"
+          - "confirm automation delete"
+          - "confirm the pending automation change"
+
+  HVConfirmScriptManage:
+    data:
+      - sentences:
+          - "confirm script operation"
+          - "confirm script update"
+          - "confirm script delete"
+          - "confirm the pending script change"
+
 lists:
   # Example list placeholder (optional)
   # mode_name:

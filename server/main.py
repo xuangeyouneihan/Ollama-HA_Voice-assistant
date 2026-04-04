@@ -52,6 +52,11 @@ class CreateAutomationRequest(BaseModel):
     language: str | None = None
 
 
+class CreateScriptRequest(BaseModel):
+    text: str
+    language: str | None = None
+
+
 class ManageAutomationRequest(BaseModel):
     text: str = ""
     expected_operation: str
@@ -59,6 +64,20 @@ class ManageAutomationRequest(BaseModel):
     language: str | None = None
     confirmation_id: str | None = None
     confirm: bool = False
+
+
+class ManageScriptRequest(BaseModel):
+    text: str = ""
+    expected_operation: str
+    session_id: str
+    language: str | None = None
+    confirmation_id: str | None = None
+    confirm: bool = False
+
+
+class ConfirmManageRequest(BaseModel):
+    session_id: str
+    expected_operation: str | None = None
 
 
 @app.websocket("/audio")
@@ -137,6 +156,26 @@ async def create_automation_from_text(req: CreateAutomationRequest):
         raise HTTPException(status_code=500, detail=f"internal error: {exc}") from exc
 
 
+@app.post("/ha-scripts/from-text")
+async def create_script_from_text(req: CreateScriptRequest):
+    try:
+        manager = get_automation_manager()
+        result = manager.create_script_from_text(text=req.text, language=req.language)
+        return result
+    except AutomationError as exc:
+        detail: str | dict[str, object] = str(exc)
+        debug = getattr(exc, "debug", None)
+        if isinstance(debug, dict) and debug:
+            detail = {
+                "message": str(exc),
+                "debug": debug,
+            }
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except Exception as exc:
+        logger.exception("Failed to create script from text")
+        raise HTTPException(status_code=500, detail=f"internal error: {exc}") from exc
+
+
 @app.post("/ha-tasks/manage-from-text")
 async def manage_automation_from_text(req: ManageAutomationRequest):
     op = (req.expected_operation or "").strip()
@@ -173,6 +212,99 @@ async def manage_automation_from_text(req: ManageAutomationRequest):
         raise
     except Exception as exc:
         logger.exception("Failed to manage automation from text")
+        raise HTTPException(status_code=500, detail=f"internal error: {exc}") from exc
+
+
+@app.post("/ha-scripts/manage-from-text")
+async def manage_script_from_text(req: ManageScriptRequest):
+    op = (req.expected_operation or "").strip()
+    if op not in {"task_update", "task_delete"}:
+        raise HTTPException(status_code=400, detail="expected_operation must be task_update or task_delete")
+
+    session_id = (req.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    try:
+        manager = get_automation_manager()
+        if req.confirm or req.confirmation_id:
+            if not req.confirmation_id:
+                raise HTTPException(status_code=400, detail="confirmation_id required for confirmation")
+            return manager.confirm_manage_script(req.confirmation_id, session_id=session_id)
+
+        return manager.prepare_manage_script(
+            text=req.text,
+            expected_operation=op,
+            session_id=session_id,
+            language=req.language,
+        )
+    except AutomationError as exc:
+        detail: str | dict[str, object] = str(exc)
+        debug = getattr(exc, "debug", None)
+        if isinstance(debug, dict) and debug:
+            detail = {
+                "message": str(exc),
+                "debug": debug,
+            }
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to manage script from text")
+        raise HTTPException(status_code=500, detail=f"internal error: {exc}") from exc
+
+
+@app.post("/ha-tasks/confirm")
+async def confirm_automation_manage(req: ConfirmManageRequest):
+    session_id = (req.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    op = (req.expected_operation or "").strip() if req.expected_operation else ""
+    if op and op not in {"task_update", "task_delete"}:
+        raise HTTPException(status_code=400, detail="expected_operation must be task_update or task_delete")
+
+    try:
+        manager = get_automation_manager()
+        return manager.confirm_latest_manage(session_id=session_id, expected_operation=op or None)
+    except AutomationError as exc:
+        detail: str | dict[str, object] = str(exc)
+        debug = getattr(exc, "debug", None)
+        if isinstance(debug, dict) and debug:
+            detail = {
+                "message": str(exc),
+                "debug": debug,
+            }
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except Exception as exc:
+        logger.exception("Failed to confirm automation manage action")
+        raise HTTPException(status_code=500, detail=f"internal error: {exc}") from exc
+
+
+@app.post("/ha-scripts/confirm")
+async def confirm_script_manage(req: ConfirmManageRequest):
+    session_id = (req.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    op = (req.expected_operation or "").strip() if req.expected_operation else ""
+    if op and op not in {"task_update", "task_delete"}:
+        raise HTTPException(status_code=400, detail="expected_operation must be task_update or task_delete")
+
+    try:
+        manager = get_automation_manager()
+        return manager.confirm_latest_manage_script(session_id=session_id, expected_operation=op or None)
+    except AutomationError as exc:
+        detail: str | dict[str, object] = str(exc)
+        debug = getattr(exc, "debug", None)
+        if isinstance(debug, dict) and debug:
+            detail = {
+                "message": str(exc),
+                "debug": debug,
+            }
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except Exception as exc:
+        logger.exception("Failed to confirm script manage action")
         raise HTTPException(status_code=500, detail=f"internal error: {exc}") from exc
 
 
