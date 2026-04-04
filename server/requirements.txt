@@ -3,6 +3,5 @@ uvicorn[standard]<1
 websockets
 requests>=2.0,<3
 pyyaml>=6.0,<7
-sounddevice<1
 numpy>=2.0,<3
 av>=12,<16
