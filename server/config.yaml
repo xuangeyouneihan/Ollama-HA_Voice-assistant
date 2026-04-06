@@ -21,7 +21,8 @@ llm:
 
 home_assistant:
   enabled: true
-  url: http://homeassistant.local:8123
+  # url: http://homeassistant.local:8123
+  url: http://localhost:8123
   # Home Assistant configuration directory on local filesystem.
   # automation_manager writes automations directly to <config_dir>/automations.yaml
   config_dir: /var/lib/homeassistant/homeassistant
@@ -42,6 +43,7 @@ home_assistant:
   assist_audio_timeout_s: 45
   auto_discover: true
   automation_conversation_agent: conversation.automation_manager
+  automation_api_timeout_s: 60
 
 audio:
   sample_rate: 44100

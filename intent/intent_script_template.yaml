@@ -1,73 +1,261 @@
-# intent_script template for Home Assistant
-#
-# This file is a template snippet.
-# Copy the `intent_script` section into your Home Assistant configuration.yaml,
-# then adjust rest_command names/URLs as needed.
-#
-# Expected intent names (from custom intents):
-# - HVCreateAutomation
-# - HVUpdateAutomation
-# - HVDeleteAutomation
-# - HVCreateScript
-# - HVUpdateScript
-# - HVDeleteScript
-# - HVConfirmAutomationManage
-# - HVConfirmScriptManage
-#
-# Two-step behavior for update/delete:
-# 1) First call to manage endpoint returns a confirmation message and a pending action.
-# 2) Save confirmation_id from response.
-# 3) Call the same manage endpoint again with:
-#    {"confirmation_id":"...", "confirm":true, "session_id":"same-as-step1", "expected_operation":"task_update|task_delete"}
-
 intent_script:
   HVCreateAutomation:
+    card:
+      type: simple
+      title: "HV Create Automation"
+      content: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          自动化请求已完成，但未收到返回内容。
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "自动化已创建。" }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "自动化创建失败（HTTP " ~ (r.status | string) ~ "）。" ~ ("详情：" ~ err if err else "") }}
+        {% endif %}
     speech:
-      text: "Okay, I will create that automation."
+      text: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          [HV] Automation request finished, but no action response was returned.
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "[HV] Automation request succeeded." }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "[HV] Automation request failed (HTTP " ~ (r.status | string) ~ ")." ~ (" Detail: " ~ err if err else "") }}
+        {% endif %}
     action:
       - service: rest_command.hv_task_create
+        response_variable: result
         data:
-          text: "{{ text }}"
+          text: "{{ (text if text is defined and (text | trim) else (name if name is defined else '')) | trim }}"
+      - stop: ""
+        response_variable: result
 
   HVUpdateAutomation:
+    card:
+      type: simple
+      title: "HV Update Automation"
+      content: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          自动化更新已完成，但未收到返回内容。
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "自动化已更新。" }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "自动化更新失败（HTTP " ~ (r.status | string) ~ "）。" ~ ("详情：" ~ err if err else "") }}
+        {% endif %}
     speech:
-      text: "Okay, I will update that automation."
+      text: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          [HV] Automation update finished, but no action response was returned.
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "[HV] Automation update request succeeded." }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "[HV] Automation update request failed (HTTP " ~ (r.status | string) ~ ")." ~ (" Detail: " ~ err if err else "") }}
+        {% endif %}
     action:
       - service: rest_command.hv_task_manage_update
+        response_variable: result
         data:
-          text: "{{ text }}"
+          text: "{{ (text if text is defined and (text | trim) else (name if name is defined else '')) | trim }}"
+      - stop: ""
+        response_variable: result
 
   HVDeleteAutomation:
+    card:
+      type: simple
+      title: "HV Delete Automation"
+      content: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          自动化删除已完成，但未收到返回内容。
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "自动化已删除。" }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "自动化删除失败（HTTP " ~ (r.status | string) ~ "）。" ~ ("详情：" ~ err if err else "") }}
+        {% endif %}
     speech:
-      text: "Okay, I will delete that automation."
+      text: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          [HV] Automation delete finished, but no action response was returned.
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "[HV] Automation delete request succeeded." }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "[HV] Automation delete request failed (HTTP " ~ (r.status | string) ~ ")." ~ (" Detail: " ~ err if err else "") }}
+        {% endif %}
     action:
       - service: rest_command.hv_task_manage_delete
+        response_variable: result
         data:
-          text: "{{ text }}"
+          text: "{{ (text if text is defined and (text | trim) else (name if name is defined else '')) | trim }}"
+      - stop: ""
+        response_variable: result
 
   HVCreateScript:
+    card:
+      type: simple
+      title: "HV Create Script"
+      content: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          脚本请求已完成，但未收到返回内容。
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "脚本已创建。" }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "脚本创建失败（HTTP " ~ (r.status | string) ~ "）。" ~ ("详情：" ~ err if err else "") }}
+        {% endif %}
     speech:
-      text: "Okay, I will create that script."
+      text: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          [HV] Script request finished, but no action response was returned.
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "[HV] Script request succeeded." }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "[HV] Script request failed (HTTP " ~ (r.status | string) ~ ")." ~ (" Detail: " ~ err if err else "") }}
+        {% endif %}
     action:
       - service: rest_command.hv_script_create
+        response_variable: result
         data:
-          text: "{{ text }}"
+          text: "{{ (text if text is defined and (text | trim) else (name if name is defined else '')) | trim }}"
+      - stop: ""
+        response_variable: result
 
   HVUpdateScript:
+    card:
+      type: simple
+      title: "HV Update Script"
+      content: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          脚本更新已完成，但未收到返回内容。
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "脚本已更新。" }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "脚本更新失败（HTTP " ~ (r.status | string) ~ "）。" ~ ("详情：" ~ err if err else "") }}
+        {% endif %}
     speech:
-      text: "Okay, I will update that script."
+      text: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          [HV] Script update finished, but no action response was returned.
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "[HV] Script update request succeeded." }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "[HV] Script update request failed (HTTP " ~ (r.status | string) ~ ")." ~ (" Detail: " ~ err if err else "") }}
+        {% endif %}
     action:
       - service: rest_command.hv_script_manage_update
+        response_variable: result
         data:
-          text: "{{ text }}"
+          text: "{{ (text if text is defined and (text | trim) else (name if name is defined else '')) | trim }}"
+      - stop: ""
+        response_variable: result
 
   HVDeleteScript:
+    card:
+      type: simple
+      title: "HV Delete Script"
+      content: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          脚本删除已完成，但未收到返回内容。
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "脚本已删除。" }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "脚本删除失败（HTTP " ~ (r.status | string) ~ "）。" ~ ("详情：" ~ err if err else "") }}
+        {% endif %}
     speech:
-      text: "Okay, I will delete that script."
+      text: >-
+        {% set r = action_response if action_response is defined else none %}
+        {% if r is none %}
+          [HV] Script delete finished, but no action response was returned.
+        {% elif r.status == 200 %}
+          {{ r.content.message if r.content is mapping and r.content.message is defined else "[HV] Script delete request succeeded." }}
+        {% else %}
+          {% set err = "" %}
+          {% if r.content is mapping %}
+            {% set err = r.content.error if r.content.error is defined else (r.content.detail if r.content.detail is defined else (r.content.message if r.content.message is defined else "")) %}
+          {% else %}
+            {% set err = r.content | string %}
+          {% endif %}
+          {{ "[HV] Script delete request failed (HTTP " ~ (r.status | string) ~ ")." ~ (" Detail: " ~ err if err else "") }}
+        {% endif %}
     action:
       - service: rest_command.hv_script_manage_delete
+        response_variable: result
         data:
-          text: "{{ text }}"
+          text: "{{ (text if text is defined and (text | trim) else (name if name is defined else '')) | trim }}"
+      - stop: ""
+        response_variable: result
 
   HVConfirmAutomationManage:
     speech:
@@ -81,52 +269,103 @@ intent_script:
     action:
       - service: rest_command.hv_script_confirm
 
-# Optional: matching rest_command template (put in configuration.yaml)
-# rest_command:
-#   hv_task_create:
-#     url: "http://<SERVER_IP>:8000/ha-tasks/from-text"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"text": "{{ text }}"}'
-#
-#   hv_task_manage_update:
-#     url: "http://<SERVER_IP>:8000/ha-tasks/manage-from-text"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"text": "{{ text }}", "expected_operation": "task_update", "session_id": "ha_assist"}'
-#
-#   hv_task_manage_delete:
-#     url: "http://<SERVER_IP>:8000/ha-tasks/manage-from-text"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"text": "{{ text }}", "expected_operation": "task_delete", "session_id": "ha_assist"}'
-#
-#   hv_script_create:
-#     url: "http://<SERVER_IP>:8000/ha-scripts/from-text"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"text": "{{ text }}"}'
-#
-#   hv_script_manage_update:
-#     url: "http://<SERVER_IP>:8000/ha-scripts/manage-from-text"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"text": "{{ text }}", "expected_operation": "task_update", "session_id": "ha_assist"}'
-#
-#   hv_script_manage_delete:
-#     url: "http://<SERVER_IP>:8000/ha-scripts/manage-from-text"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"text": "{{ text }}", "expected_operation": "task_delete", "session_id": "ha_assist"}'
-#
-#   hv_task_confirm:
-#     url: "http://<SERVER_IP>:8000/ha-tasks/confirm"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"session_id": "ha_assist"}'
-#
-#   hv_script_confirm:
-#     url: "http://<SERVER_IP>:8000/ha-scripts/confirm"
-#     method: POST
-#     content_type: "application/json"
-#     payload: '{"session_id": "ha_assist"}'
+rest_command:
+  hv_task_create:
+    url: "http://localhost:8000/ha-tasks/from-text"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "text": text if text is defined else "",
+          "language": "zh"
+        } | tojson
+      }}
+
+  hv_task_manage_update:
+    url: "http://localhost:8000/ha-tasks/manage-from-text"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "text": text if text is defined else "",
+          "expected_operation": "task_update",
+          "session_id": "ha_assist",
+          "language": "zh"
+        } | tojson
+      }}
+
+  hv_task_manage_delete:
+    url: "http://localhost:8000/ha-tasks/manage-from-text"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "text": text if text is defined else "",
+          "expected_operation": "task_delete",
+          "session_id": "ha_assist",
+          "language": "zh"
+        } | tojson
+      }}
+
+  hv_script_create:
+    url: "http://localhost:8000/ha-scripts/from-text"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "text": text if text is defined else "",
+          "language": "zh"
+        } | tojson
+      }}
+
+  hv_script_manage_update:
+    url: "http://localhost:8000/ha-scripts/manage-from-text"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "text": text if text is defined else "",
+          "expected_operation": "task_update",
+          "session_id": "ha_assist",
+          "language": "zh"
+        } | tojson
+      }}
+
+  hv_script_manage_delete:
+    url: "http://localhost:8000/ha-scripts/manage-from-text"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "text": text if text is defined else "",
+          "expected_operation": "task_delete",
+          "session_id": "ha_assist",
+          "language": "zh"
+        } | tojson
+      }}
+
+  hv_task_confirm:
+    url: "http://localhost:8000/ha-tasks/confirm"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: '{"session_id":"ha_assist"}'
+
+  hv_script_confirm:
+    url: "http://localhost:8000/ha-scripts/confirm"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: '{"session_id":"ha_assist"}'

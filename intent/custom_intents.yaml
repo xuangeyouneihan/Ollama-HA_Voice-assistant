@@ -17,56 +17,63 @@ intents:
   HVCreateAutomation:
     data:
       - sentences:
-          - "create an automation {text}"
-          - "help me create an automation {text}"
-          - "create a scheduled task {text}"
-          - "help me create a scheduled task {text}"
-          - "create a planned task {text}"
-          - "add a scheduled task {text}"
+          - "create an automation {name}"
+          - "create an automation: {name}"
+          - "help me create an automation {name}"
+          - "create a scheduled task {name}"
+          - "create a scheduled task: {name}"
+          - "help me create a scheduled task {name}"
+          - "create a planned task {name}"
+          - "add a scheduled task {name}"
 
   HVUpdateAutomation:
     data:
       - sentences:
-          - "update automation {text}"
-          - "modify automation {text}"
-          - "update scheduled task {text}"
-          - "modify scheduled task {text}"
-          - "edit planned task {text}"
-          - "change scheduled task to {text}"
+          - "update automation {name}"
+          - "update automation: {name}"
+          - "modify automation {name}"
+          - "update scheduled task {name}"
+          - "modify scheduled task {name}"
+          - "edit planned task {name}"
+          - "change scheduled task to {name}"
 
   HVDeleteAutomation:
     data:
       - sentences:
-          - "delete automation {text}"
-          - "remove automation {text}"
-          - "delete scheduled task {text}"
-          - "remove scheduled task {text}"
-          - "cancel scheduled task {text}"
-          - "disable planned task {text}"
+          - "delete automation {name}"
+          - "delete automation: {name}"
+          - "remove automation {name}"
+          - "delete scheduled task {name}"
+          - "remove scheduled task {name}"
+          - "cancel scheduled task {name}"
+          - "disable planned task {name}"
 
   HVCreateScript:
     data:
       - sentences:
-          - "create a script {text}"
-          - "help me create a script {text}"
-          - "add a script {text}"
-          - "make a script {text}"
+          - "create a script {name}"
+          - "create a script: {name}"
+          - "help me create a script {name}"
+          - "add a script {name}"
+          - "make a script {name}"
 
   HVUpdateScript:
     data:
       - sentences:
-          - "update script {text}"
-          - "modify script {text}"
-          - "edit script {text}"
-          - "change script to {text}"
+          - "update script {name}"
+          - "update script: {name}"
+          - "modify script {name}"
+          - "edit script {name}"
+          - "change script to {name}"
 
   HVDeleteScript:
     data:
       - sentences:
-          - "delete script {text}"
-          - "remove script {text}"
-          - "cancel script {text}"
-          - "disable script {text}"
+          - "delete script {name}"
+          - "delete script: {name}"
+          - "remove script {name}"
+          - "cancel script {name}"
+          - "disable script {name}"
 
   HVConfirmAutomationManage:
     data:
@@ -85,6 +92,9 @@ intents:
           - "confirm the pending script change"
 
 lists:
+  name:
+    wildcard: true
+
   # Example list placeholder (optional)
   # mode_name:
   #   values:

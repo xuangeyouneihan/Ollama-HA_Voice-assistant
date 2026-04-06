@@ -15,80 +15,95 @@ intents:
   HVCreateAutomation:
     data:
       - sentences:
-          - "创建自动化 {text}"
-          - "帮我创建自动化 {text}"
-          - "新建自动化 {text}"
-          - "帮我新建一个自动化 {text}"
-          - "添加自动化 {text}"
-          - "请创建一个自动化 {text}"
-          - "做一个自动化 {text}"
-          - "创建计划任务 {text}"
-          - "帮我创建计划任务 {text}"
-          - "新建计划任务 {text}"
-          - "添加计划任务 {text}"
-          - "创建定时任务 {text}"
-          - "新建定时任务 {text}"
+          - "创建自动化 {name}"
+          - "创建自动化：{name}"
+          - "创建自动化:{name}"
+          - "帮我创建自动化 {name}"
+          - "帮我创建自动化：{name}"
+          - "新建自动化 {name}"
+          - "新建自动化：{name}"
+          - "帮我新建一个自动化 {name}"
+          - "添加自动化 {name}"
+          - "添加自动化：{name}"
+          - "请创建一个自动化 {name}"
+          - "做一个自动化 {name}"
+          - "创建计划任务 {name}"
+          - "创建计划任务：{name}"
+          - "帮我创建计划任务 {name}"
+          - "新建计划任务 {name}"
+          - "添加计划任务 {name}"
+          - "创建定时任务 {name}"
+          - "创建定时任务：{name}"
+          - "新建定时任务 {name}"
 
   HVUpdateAutomation:
     data:
       - sentences:
-          - "修改自动化 {text}"
-          - "更新自动化 {text}"
-          - "帮我修改自动化 {text}"
-          - "帮我更新自动化 {text}"
-          - "把自动化改成 {text}"
-          - "调整自动化 {text}"
-          - "编辑自动化 {text}"
-          - "修改计划任务 {text}"
-          - "更新计划任务 {text}"
-          - "帮我修改计划任务 {text}"
-          - "把计划任务改成 {text}"
-          - "修改定时任务 {text}"
-          - "调整定时任务 {text}"
+          - "修改自动化 {name}"
+          - "修改自动化：{name}"
+          - "更新自动化 {name}"
+          - "更新自动化：{name}"
+          - "帮我修改自动化 {name}"
+          - "帮我更新自动化 {name}"
+          - "把自动化改成 {name}"
+          - "调整自动化 {name}"
+          - "调整自动化为 {name}"
+          - "编辑自动化 {name}"
+          - "修改计划任务 {name}"
+          - "更新计划任务 {name}"
+          - "帮我修改计划任务 {name}"
+          - "把计划任务改成 {name}"
+          - "修改定时任务 {name}"
+          - "调整定时任务 {name}"
 
   HVDeleteAutomation:
     data:
       - sentences:
-          - "删除自动化 {text}"
-          - "移除自动化 {text}"
-          - "帮我删除自动化 {text}"
-          - "取消自动化 {text}"
-          - "把这个自动化删掉 {text}"
-          - "停止这个自动化 {text}"
-          - "禁用自动化 {text}"
-          - "删除计划任务 {text}"
-          - "移除计划任务 {text}"
-          - "取消计划任务 {text}"
-          - "删除定时任务 {text}"
-          - "停止定时任务 {text}"
-          - "禁用定时任务 {text}"
+          - "删除自动化 {name}"
+          - "删除自动化：{name}"
+          - "移除自动化 {name}"
+          - "帮我删除自动化 {name}"
+          - "取消自动化 {name}"
+          - "把这个自动化删掉 {name}"
+          - "停止这个自动化 {name}"
+          - "禁用自动化 {name}"
+          - "删除计划任务 {name}"
+          - "移除计划任务 {name}"
+          - "取消计划任务 {name}"
+          - "删除定时任务 {name}"
+          - "停止定时任务 {name}"
+          - "禁用定时任务 {name}"
 
   HVCreateScript:
     data:
       - sentences:
-          - "创建脚本 {text}"
-          - "新建脚本 {text}"
-          - "帮我创建脚本 {text}"
-          - "添加脚本 {text}"
-          - "请创建脚本 {text}"
+          - "创建脚本 {name}"
+          - "创建脚本：{name}"
+          - "新建脚本 {name}"
+          - "帮我创建脚本 {name}"
+          - "添加脚本 {name}"
+          - "请创建脚本 {name}"
 
   HVUpdateScript:
     data:
       - sentences:
-          - "修改脚本 {text}"
-          - "更新脚本 {text}"
-          - "帮我修改脚本 {text}"
-          - "编辑脚本 {text}"
-          - "把脚本改成 {text}"
+          - "修改脚本 {name}"
+          - "修改脚本：{name}"
+          - "更新脚本 {name}"
+          - "更新脚本：{name}"
+          - "帮我修改脚本 {name}"
+          - "编辑脚本 {name}"
+          - "把脚本改成 {name}"
 
   HVDeleteScript:
     data:
       - sentences:
-          - "删除脚本 {text}"
-          - "移除脚本 {text}"
-          - "帮我删除脚本 {text}"
-          - "取消脚本 {text}"
-          - "禁用脚本 {text}"
+          - "删除脚本 {name}"
+          - "删除脚本：{name}"
+          - "移除脚本 {name}"
+          - "帮我删除脚本 {name}"
+          - "取消脚本 {name}"
+          - "禁用脚本 {name}"
 
   HVConfirmAutomationManage:
     data:
@@ -107,6 +122,9 @@ intents:
           - "确认刚才的脚本操作"
 
 lists:
+  name:
+    wildcard: true
+
   # Optional placeholder for future slot normalization
   # mode_name:
   #   values:
