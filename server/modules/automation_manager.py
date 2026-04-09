@@ -96,6 +96,25 @@ class PendingActionStore:
         payload = self._items.pop(token, {}).get("payload") or {}
         return token, dict(payload)
 
+    def count(
+        self,
+        operation: str | None = None,
+        session_id: str | None = None,
+        resource_type: str | None = None,
+    ) -> int:
+        self._cleanup()
+        total = 0
+        for item in self._items.values():
+            payload = dict(item.get("payload") or {})
+            if operation and str(payload.get("operation") or "") != operation:
+                continue
+            if session_id and str(payload.get("session_id") or "") != session_id:
+                continue
+            if resource_type and str(payload.get("resource_type") or "automation") != resource_type:
+                continue
+            total += 1
+        return total
+
     def _cleanup(self):
         now = time.time()
         expired = [
@@ -151,6 +170,20 @@ class HomeAssistantAutomationClient:
         self.script_plan_retry_max = max(0, int(ha_cfg.get("script_plan_retry_max", 2)))
         self.script_auto_expose_default = bool(ha_cfg.get("script_auto_expose_default", True))
         self.manage_only_exposed_scripts = bool(ha_cfg.get("manage_only_exposed_scripts", True))
+
+        llm_cfg = cfg.get("llm", {}) if cfg else {}
+        self.ollama_host = str(llm_cfg.get("host", "http://localhost:11434")).rstrip("/")
+        self.ollama_model = str(llm_cfg.get("model", "")).strip()
+        self.ollama_timeout = float(llm_cfg.get("timeout", 120))
+        self.ollama_system_prompt = str(llm_cfg.get("system_prompt", "")).strip()
+        self.qwen35_reasoning_budget_enabled = bool(llm_cfg.get("qwen35_reasoning_budget_enabled", False))
+        self.exposed_entities_prompt_limit = max(0, int(llm_cfg.get("exposed_entities_prompt_limit", 80)))
+        logger.info(
+            "Automation planner external Ollama configured: host=%s, model=%s, system_prompt_chars=%s",
+            self.ollama_host,
+            self.ollama_model,
+            len(self.ollama_system_prompt),
+        )
 
         if not self.token:
             raise AutomationError("home_assistant.token is empty; cannot manage automations")
@@ -381,6 +414,47 @@ class HomeAssistantAutomationClient:
                     mapped[assistant] = bool(value)
             exposed[entity_id] = mapped
         return exposed
+
+    def list_exposed_entity_summaries(self, limit: int = 80) -> list[dict[str, str]]:
+        exposed = self.list_exposed_entities()
+        exposed_ids = [
+            entity_id
+            for entity_id, flags in exposed.items()
+            if bool(flags.get("conversation", False))
+        ]
+        if not exposed_ids:
+            return []
+
+        states = self._request_json("GET", "/api/states")
+        if not isinstance(states, list):
+            return []
+
+        state_index: dict[str, dict[str, Any]] = {}
+        for item in states:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id") or "").strip()
+            if entity_id:
+                state_index[entity_id] = item
+
+        rows: list[dict[str, str]] = []
+        for entity_id in sorted(exposed_ids):
+            item = state_index.get(entity_id)
+            if not isinstance(item, dict):
+                continue
+            attrs_raw = item.get("attributes")
+            attrs: dict[str, Any] = attrs_raw if isinstance(attrs_raw, dict) else {}
+            rows.append(
+                {
+                    "entity_id": entity_id,
+                    "name": str(attrs.get("friendly_name") or "").strip(),
+                    "domain": str(entity_id.split(".", 1)[0] if "." in entity_id else "").strip(),
+                    "state": str(item.get("state") or "").strip(),
+                }
+            )
+            if len(rows) >= max(1, int(limit)):
+                break
+        return rows
 
     def list_state_entity_ids(self) -> set[str]:
         states = self._request_json("GET", "/api/states")
@@ -766,23 +840,142 @@ class HomeAssistantAutomationClient:
 
         return None
 
-    def ask_conversation(self, prompt: str, language: str | None = None) -> str:
-        body: dict[str, Any] = {
-            "text": prompt,
-            "language": language or self.conversation_language,
-        }
-        if self.conversation_agent_id:
-            body["agent_id"] = self.conversation_agent_id
+    def _post_ollama_chat(
+        self,
+        messages: list[dict[str, str]],
+        think: str | bool | None,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.ollama_model:
+            raise AutomationError("llm.model is empty; cannot call external Ollama for planning")
 
-        payload = self._request_json("POST", "/api/conversation/process", json_body=body)
-        response = payload.get("response") or {}
-        speech = response.get("speech") or {}
-        plain_raw = speech.get("plain")
-        ssml_raw = speech.get("ssml")
-        plain = plain_raw if isinstance(plain_raw, dict) else {}
-        ssml = ssml_raw if isinstance(ssml_raw, dict) else {}
-        text = str(plain.get("speech") or ssml.get("speech") or "").strip()
-        return text
+        payload: dict[str, Any] = {
+            "model": self.ollama_model,
+            "stream": False,
+            "messages": messages,
+            "options": options,
+        }
+        if think is not None:
+            payload["think"] = think
+
+        try:
+            resp = requests.post(
+                f"{self.ollama_host}/api/chat",
+                json=payload,
+                timeout=self.ollama_timeout,
+            )
+        except requests.RequestException as exc:
+            raise AutomationError(f"request to external Ollama failed: {exc}") from exc
+
+        if resp.status_code >= 400:
+            raise AutomationError(f"external Ollama API error {resp.status_code}: {resp.text}")
+
+        try:
+            result = resp.json()
+        except ValueError as exc:
+            raise AutomationError(f"external Ollama returned non-JSON response: {resp.text}") from exc
+
+        if not isinstance(result, dict):
+            raise AutomationError("external Ollama returned invalid response object")
+        return result
+
+    @staticmethod
+    def _extract_ollama_message_content(payload: dict[str, Any]) -> str:
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            return ""
+        return str(message.get("content") or "").strip()
+
+    @staticmethod
+    def _extract_ollama_thinking(payload: dict[str, Any]) -> str:
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            return ""
+        return str(message.get("thinking") or "").strip()
+
+    def ask_conversation(
+        self,
+        prompt: str,
+        language: str | None = None,
+        include_exposed_entities: bool = False,
+    ) -> str:
+        lang = language or self.conversation_language
+        prompt_text = str(prompt or "").strip()
+
+        if include_exposed_entities:
+            try:
+                exposed_rows = self.list_exposed_entity_summaries(limit=self.exposed_entities_prompt_limit)
+            except Exception as exc:
+                logger.warning("Failed to load exposed entities for planner context: %s", exc)
+                exposed_rows = []
+            if exposed_rows:
+                prompt_text += (
+                    "\n\nOnly these entities are exposed to Assist. Prefer these entities in plans. "
+                    f"Use exact entity_id values when possible: {json.dumps(exposed_rows, ensure_ascii=False)}"
+                )
+
+        default_planner_system_prompt = (
+            "You are an automation-planning agent for Home Assistant. "
+            "Return exactly one valid JSON object. No markdown. No explanation. "
+            "No tool calls. Never execute actions or intents."
+        )
+        effective_system_prompt = self.ollama_system_prompt or default_planner_system_prompt
+
+        messages: list[dict[str, str]] = []
+        messages.append({"role": "system", "content": effective_system_prompt})
+        messages.append({"role": "user", "content": prompt_text})
+
+        model_lower = self.ollama_model.lower()
+        use_qwen35_budget = self.qwen35_reasoning_budget_enabled and "qwen3.5" in model_lower
+
+        if use_qwen35_budget:
+            reason_payload = self._post_ollama_chat(
+                messages=messages,
+                think="medium",
+                options={
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "top_k": 20,
+                    "presence_penalty": 1.5,
+                    "num_predict": 512,
+                },
+            )
+            done_reason = str(reason_payload.get("done_reason") or "").strip().lower()
+            if done_reason == "stop":
+                return self._extract_ollama_message_content(reason_payload)
+
+            thinking = self._extract_ollama_thinking(reason_payload)
+            final_prompt = (
+                "Review the reasoning above. Ignore any self-corrections or second-guessing. "
+                "What was the first conclusion reached? Return only the final answer."
+            )
+            direct_messages = list(messages)
+            if thinking:
+                direct_messages.append({"role": "assistant", "content": f"<think>\n{thinking}\n</think>"})
+            direct_messages.append({"role": "user", "content": final_prompt})
+            direct_payload = self._post_ollama_chat(
+                messages=direct_messages,
+                think=False,
+                options={
+                    "temperature": 0.0,
+                    "top_p": 0.8,
+                    "top_k": 20,
+                    "presence_penalty": 1.1,
+                },
+            )
+            return self._extract_ollama_message_content(direct_payload)
+
+        payload = self._post_ollama_chat(
+            messages=messages,
+            think=False,
+            options={
+                "temperature": 0.0,
+                "top_p": 0.9,
+                "top_k": 40,
+                "num_predict": 512,
+            },
+        )
+        return self._extract_ollama_message_content(payload)
 
 
 class AutomationManager:
@@ -841,6 +1034,13 @@ class AutomationManager:
         except json.JSONDecodeError:
             return None
         return obj if isinstance(obj, dict) else None
+
+    @staticmethod
+    def _preview_text(text: str, limit: int = 1200) -> str:
+        raw = str(text or "")
+        if len(raw) <= limit:
+            return raw
+        return f"{raw[:limit]}...(truncated, total={len(raw)})"
 
     @staticmethod
     def _looks_like_agent_failure_text(text: str) -> bool:
@@ -1477,6 +1677,17 @@ class AutomationManager:
                     normalized_item["target"] = {"entity_id": normalized_item.get("entity_id")}
                     normalized_item.pop("entity_id", None)
 
+                # Accept LLM shorthand target_id and map it to target.entity_id.
+                # HA validate_config rejects unknown keys like target_id in action objects.
+                if "target_id" in normalized_item:
+                    target_id_value = normalized_item.pop("target_id")
+                    target_obj = normalized_item.get("target")
+                    if not isinstance(target_obj, dict):
+                        target_obj = {}
+                    if "entity_id" not in target_obj:
+                        target_obj["entity_id"] = target_id_value
+                    normalized_item["target"] = target_obj
+
                 target_raw = normalized_item.get("target")
                 if isinstance(target_raw, dict):
                     target = dict(target_raw)
@@ -1879,8 +2090,22 @@ class AutomationManager:
                 "可操作任意已暴露给语音助手的实体，优先在 action 中提供 target.entity_id（或 entity_id）和 data；"
                 "不要把 domain.service（例如 scene.turn_on）写入 entity_id 字段。"
             )
-        raw = self.client.ask_conversation(prompt, language=language)
+        raw = self.client.ask_conversation(
+            prompt,
+            language=language,
+            include_exposed_entities=True,
+        )
+        logger.info(
+            "conversation planning raw response (automation, op=%s): %s",
+            operation,
+            self._preview_text(raw),
+        )
         parsed = self._extract_json_block(raw) or {}
+        logger.info(
+            "conversation planning parsed JSON (automation, op=%s): %s",
+            operation,
+            parsed if parsed else "<empty-or-invalid-json>",
+        )
 
         if not parsed:
             if self.client.uses_default_conversation_agent:
@@ -1937,8 +2162,22 @@ class AutomationManager:
                 "优先在步骤中提供 target.entity_id（或 entity_id）和 data；"
                 "不要把 domain.service（例如 light.turn_on）写入 entity_id 字段。"
             )
-        raw = self.client.ask_conversation(prompt, language=language)
+        raw = self.client.ask_conversation(
+            prompt,
+            language=language,
+            include_exposed_entities=True,
+        )
+        logger.info(
+            "conversation planning raw response (script, op=%s): %s",
+            operation,
+            self._preview_text(raw),
+        )
         parsed = self._extract_json_block(raw) or {}
+        logger.info(
+            "conversation planning parsed JSON (script, op=%s): %s",
+            operation,
+            parsed if parsed else "<empty-or-invalid-json>",
+        )
 
         if not parsed:
             if self.client.uses_default_conversation_agent:
@@ -2735,6 +2974,14 @@ class AutomationManager:
             else:
                 raise AutomationError("expected_operation must be task_update or task_delete")
 
+        if operation is None:
+            pending_count = self.pending.count(session_id=session, resource_type="automation")
+            if pending_count > 1:
+                raise AutomationError(
+                    "multiple pending automation confirmations exist in current session; "
+                    "please confirm with confirmation_id or expected_operation"
+                )
+
         latest = self.pending.pop_latest(
             operation=operation,
             session_id=session,
@@ -2762,6 +3009,14 @@ class AutomationManager:
                 operation = "delete"
             else:
                 raise AutomationError("expected_operation must be task_update or task_delete")
+
+        if operation is None:
+            pending_count = self.pending.count(session_id=session, resource_type="script")
+            if pending_count > 1:
+                raise AutomationError(
+                    "multiple pending script confirmations exist in current session; "
+                    "please confirm with confirmation_id or expected_operation"
+                )
 
         latest = self.pending.pop_latest(
             operation=operation,

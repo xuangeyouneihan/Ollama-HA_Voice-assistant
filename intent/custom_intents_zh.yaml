@@ -9,6 +9,10 @@
 # - HVDeleteScript
 # - HVConfirmAutomationManage
 # - HVConfirmScriptManage
+# - HVConfirmAutomationUpdate
+# - HVConfirmAutomationDelete
+# - HVConfirmScriptUpdate
+# - HVConfirmScriptDelete
 
 language: "zh"
 intents:
@@ -113,6 +117,21 @@ intents:
           - "确认自动化删除"
           - "确认刚才的自动化操作"
 
+  HVConfirmAutomationUpdate:
+    data:
+      - sentences:
+          - "确认自动化更新"
+          - "确认自动化修改"
+          - "确认刚才的自动化更新"
+          - "确认刚才的自动化修改"
+
+  HVConfirmAutomationDelete:
+    data:
+      - sentences:
+          - "确认自动化删除"
+          - "确认删除自动化"
+          - "确认刚才的自动化删除"
+
   HVConfirmScriptManage:
     data:
       - sentences:
@@ -120,6 +139,21 @@ intents:
           - "确认脚本修改"
           - "确认脚本删除"
           - "确认刚才的脚本操作"
+
+  HVConfirmScriptUpdate:
+    data:
+      - sentences:
+          - "确认脚本更新"
+          - "确认脚本修改"
+          - "确认刚才的脚本更新"
+          - "确认刚才的脚本修改"
+
+  HVConfirmScriptDelete:
+    data:
+      - sentences:
+          - "确认脚本删除"
+          - "确认删除脚本"
+          - "确认刚才的脚本删除"
 
 lists:
   name:

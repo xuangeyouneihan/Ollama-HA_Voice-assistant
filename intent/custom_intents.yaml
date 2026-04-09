@@ -83,6 +83,20 @@ intents:
           - "confirm automation delete"
           - "confirm the pending automation change"
 
+  HVConfirmAutomationUpdate:
+    data:
+      - sentences:
+          - "confirm automation update"
+          - "confirm updating automation"
+          - "confirm the pending automation update"
+
+  HVConfirmAutomationDelete:
+    data:
+      - sentences:
+          - "confirm automation delete"
+          - "confirm deleting automation"
+          - "confirm the pending automation delete"
+
   HVConfirmScriptManage:
     data:
       - sentences:
@@ -90,6 +104,20 @@ intents:
           - "confirm script update"
           - "confirm script delete"
           - "confirm the pending script change"
+
+  HVConfirmScriptUpdate:
+    data:
+      - sentences:
+          - "confirm script update"
+          - "confirm updating script"
+          - "confirm the pending script update"
+
+  HVConfirmScriptDelete:
+    data:
+      - sentences:
+          - "confirm script delete"
+          - "confirm deleting script"
+          - "confirm the pending script delete"
 
 lists:
   name:

@@ -263,11 +263,35 @@ intent_script:
     action:
       - service: rest_command.hv_task_confirm
 
+  HVConfirmAutomationUpdate:
+    speech:
+      text: "Okay, I will confirm the pending automation update."
+    action:
+      - service: rest_command.hv_task_confirm_update
+
+  HVConfirmAutomationDelete:
+    speech:
+      text: "Okay, I will confirm the pending automation delete."
+    action:
+      - service: rest_command.hv_task_confirm_delete
+
   HVConfirmScriptManage:
     speech:
       text: "Okay, I will confirm the pending script operation."
     action:
       - service: rest_command.hv_script_confirm
+
+  HVConfirmScriptUpdate:
+    speech:
+      text: "Okay, I will confirm the pending script update."
+    action:
+      - service: rest_command.hv_script_confirm_update
+
+  HVConfirmScriptDelete:
+    speech:
+      text: "Okay, I will confirm the pending script delete."
+    action:
+      - service: rest_command.hv_script_confirm_delete
 
 rest_command:
   hv_task_create:
@@ -293,7 +317,7 @@ rest_command:
         {
           "text": text if text is defined else "",
           "expected_operation": "task_update",
-          "session_id": "ha_assist",
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
           "language": "zh"
         } | tojson
       }}
@@ -308,7 +332,7 @@ rest_command:
         {
           "text": text if text is defined else "",
           "expected_operation": "task_delete",
-          "session_id": "ha_assist",
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
           "language": "zh"
         } | tojson
       }}
@@ -336,7 +360,7 @@ rest_command:
         {
           "text": text if text is defined else "",
           "expected_operation": "task_update",
-          "session_id": "ha_assist",
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
           "language": "zh"
         } | tojson
       }}
@@ -351,7 +375,7 @@ rest_command:
         {
           "text": text if text is defined else "",
           "expected_operation": "task_delete",
-          "session_id": "ha_assist",
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
           "language": "zh"
         } | tojson
       }}
@@ -361,11 +385,73 @@ rest_command:
     method: POST
     content_type: "application/json"
     timeout: 600
-    payload: '{"session_id":"ha_assist"}'
+    payload: >-
+      {{
+        {
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist")
+        } | tojson
+      }}
+
+  hv_task_confirm_update:
+    url: "http://localhost:8000/ha-tasks/confirm"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
+          "expected_operation": "task_update"
+        } | tojson
+      }}
+
+  hv_task_confirm_delete:
+    url: "http://localhost:8000/ha-tasks/confirm"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
+          "expected_operation": "task_delete"
+        } | tojson
+      }}
 
   hv_script_confirm:
     url: "http://localhost:8000/ha-scripts/confirm"
     method: POST
     content_type: "application/json"
     timeout: 600
-    payload: '{"session_id":"ha_assist"}'
+    payload: >-
+      {{
+        {
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist")
+        } | tojson
+      }}
+
+  hv_script_confirm_update:
+    url: "http://localhost:8000/ha-scripts/confirm"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
+          "expected_operation": "task_update"
+        } | tojson
+      }}
+
+  hv_script_confirm_delete:
+    url: "http://localhost:8000/ha-scripts/confirm"
+    method: POST
+    content_type: "application/json"
+    timeout: 600
+    payload: >-
+      {{
+        {
+          "session_id": (conversation_id if conversation_id is defined and conversation_id else "ha_assist"),
+          "expected_operation": "task_delete"
+        } | tojson
+      }}
