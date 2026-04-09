@@ -1,0 +1,186 @@
+automation_create:
+  name: Create automation from text
+  description: Call backend to create an automation.
+  fields:
+    text:
+      required: true
+      example: 每天晚上10点关闭客厅灯
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:
+
+automation_update:
+  name: Update automation with confirmation flow
+  description: Prepare or confirm an automation update using confirmation_id.
+  fields:
+    text:
+      required: false
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:
+    skip_confirmation:
+      required: false
+      default: false
+      selector:
+        boolean:
+    confirmation_id:
+      required: false
+      selector:
+        text:
+    confirm:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+automation_delete:
+  name: Delete automation with confirmation flow
+  description: Prepare or confirm an automation deletion using confirmation_id.
+  fields:
+    text:
+      required: false
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:
+    skip_confirmation:
+      required: false
+      default: false
+      selector:
+        boolean:
+    confirmation_id:
+      required: false
+      selector:
+        text:
+    confirm:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+automation_confirm:
+  name: Confirm automation action
+  description: Confirm a pending automation update/delete action with confirmation_id.
+  fields:
+    expected_operation:
+      required: true
+      example: task_update
+      selector:
+        select:
+          options:
+            - task_update
+            - task_delete
+    confirmation_id:
+      required: true
+      description: Required. Must match a pending confirmation token.
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:
+
+script_create:
+  name: Create script from text
+  description: Call backend to create a script.
+  fields:
+    text:
+      required: true
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:
+
+script_update:
+  name: Update script with confirmation flow
+  description: Prepare or confirm a script update using confirmation_id.
+  fields:
+    text:
+      required: false
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:
+    skip_confirmation:
+      required: false
+      default: false
+      selector:
+        boolean:
+    confirmation_id:
+      required: false
+      selector:
+        text:
+    confirm:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+script_delete:
+  name: Delete script with confirmation flow
+  description: Prepare or confirm a script deletion using confirmation_id.
+  fields:
+    text:
+      required: false
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:
+    skip_confirmation:
+      required: false
+      default: false
+      selector:
+        boolean:
+    confirmation_id:
+      required: false
+      selector:
+        text:
+    confirm:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+script_confirm:
+  name: Confirm script action
+  description: Confirm a pending script update/delete action with confirmation_id.
+  fields:
+    expected_operation:
+      required: true
+      example: task_delete
+      selector:
+        select:
+          options:
+            - task_update
+            - task_delete
+    confirmation_id:
+      required: true
+      description: Required. Must match a pending confirmation token.
+      selector:
+        text:
+    language:
+      required: false
+      default: zh
+      selector:
+        text:

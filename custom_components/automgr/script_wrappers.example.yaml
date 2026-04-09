@@ -1,0 +1,236 @@
+# Home Assistant package example for AutoMgr script wrappers.
+# Copy this file into HA config path, for example:
+# /config/packages/automgr_wrappers.yaml
+
+script:
+  automgr_automation_create:
+    alias: AutoMgr Automation Create
+    mode: parallel
+    fields:
+      text:
+        required: true
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.automation_create
+        response_variable: result
+        data:
+          text: "{{ text }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+      - stop: ""
+        response_variable: result
+
+  automgr_automation_update:
+    alias: AutoMgr Automation Update (Prepare)
+    mode: parallel
+    fields:
+      text:
+        required: false
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.automation_update
+        response_variable: result
+        data:
+          text: "{{ text if text is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+          confirm: false
+          skip_confirmation: false
+      - stop: ""
+        response_variable: result
+
+  automgr_automation_delete:
+    alias: AutoMgr Automation Delete (Prepare)
+    mode: parallel
+    fields:
+      text:
+        required: false
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.automation_delete
+        response_variable: result
+        data:
+          text: "{{ text if text is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+          confirm: false
+          skip_confirmation: false
+      - stop: ""
+        response_variable: result
+
+  automgr_automation_confirm_update:
+    alias: AutoMgr Automation Confirm Update
+    mode: parallel
+    fields:
+      confirmation_id:
+        required: true
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.automation_confirm
+        response_variable: result
+        data:
+          expected_operation: task_update
+          confirmation_id: "{{ confirmation_id if confirmation_id is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+      - stop: ""
+        response_variable: result
+
+  automgr_automation_confirm_delete:
+    alias: AutoMgr Automation Confirm Delete
+    mode: parallel
+    fields:
+      confirmation_id:
+        required: true
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.automation_confirm
+        response_variable: result
+        data:
+          expected_operation: task_delete
+          confirmation_id: "{{ confirmation_id if confirmation_id is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+      - stop: ""
+        response_variable: result
+
+  automgr_script_create:
+    alias: AutoMgr Script Create
+    mode: parallel
+    fields:
+      text:
+        required: true
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.script_create
+        response_variable: result
+        data:
+          text: "{{ text }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+      - stop: ""
+        response_variable: result
+
+  automgr_script_update:
+    alias: AutoMgr Script Update (Prepare)
+    mode: parallel
+    fields:
+      text:
+        required: false
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.script_update
+        response_variable: result
+        data:
+          text: "{{ text if text is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+          confirm: false
+          skip_confirmation: false
+      - stop: ""
+        response_variable: result
+
+  automgr_script_delete:
+    alias: AutoMgr Script Delete (Prepare)
+    mode: parallel
+    fields:
+      text:
+        required: false
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.script_delete
+        response_variable: result
+        data:
+          text: "{{ text if text is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+          confirm: false
+          skip_confirmation: false
+      - stop: ""
+        response_variable: result
+
+  automgr_script_confirm_update:
+    alias: AutoMgr Script Confirm Update
+    mode: parallel
+    fields:
+      confirmation_id:
+        required: true
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.script_confirm
+        response_variable: result
+        data:
+          expected_operation: task_update
+          confirmation_id: "{{ confirmation_id if confirmation_id is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+      - stop: ""
+        response_variable: result
+
+  automgr_script_confirm_delete:
+    alias: AutoMgr Script Confirm Delete
+    mode: parallel
+    fields:
+      confirmation_id:
+        required: true
+        selector:
+          text:
+      language:
+        required: false
+        default: zh
+        selector:
+          text:
+    sequence:
+      - service: automgr.script_confirm
+        response_variable: result
+        data:
+          expected_operation: task_delete
+          confirmation_id: "{{ confirmation_id if confirmation_id is defined else '' }}"
+          language: "{{ language if language is defined and language else 'zh' }}"
+      - stop: ""
+        response_variable: result

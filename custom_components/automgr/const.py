@@ -1,0 +1,8 @@
+DOMAIN = "automgr"
+CONF_SERVER_URL = "server_url"
+CONF_TIMEOUT = "timeout"
+CONF_DEFAULT_LANGUAGE = "default_language"
+
+DEFAULT_SERVER_URL = "http://127.0.0.1:8000"
+DEFAULT_TIMEOUT = 30
+DEFAULT_LANGUAGE = "zh"

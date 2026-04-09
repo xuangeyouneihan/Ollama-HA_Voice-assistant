@@ -13,8 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import shutil
+import threading
 import time
 import uuid
 from urllib.parse import urlparse, urlunparse
@@ -53,9 +55,17 @@ class PendingActionStore:
     def __init__(self, ttl_seconds: int = 300):
         self._ttl_seconds = ttl_seconds
         self._items: dict[str, dict[str, Any]] = {}
+        self._rng = random.SystemRandom()
 
     def put(self, payload: dict[str, Any]) -> str:
-        token = uuid.uuid4().hex
+        token = ""
+        for _ in range(50):
+            candidate = f"{self._rng.randint(0, 999999):06d}"
+            if candidate not in self._items:
+                token = candidate
+                break
+        if not token:
+            raise AutomationError("failed to allocate confirmation_id")
         self._items[token] = {
             "created_at": time.time(),
             "payload": payload,
@@ -176,12 +186,19 @@ class HomeAssistantAutomationClient:
         self.ollama_model = str(llm_cfg.get("model", "")).strip()
         self.ollama_timeout = float(llm_cfg.get("timeout", 120))
         self.ollama_system_prompt = str(llm_cfg.get("system_prompt", "")).strip()
+        thinking_raw = llm_cfg.get("thinking", False)
+        if isinstance(thinking_raw, str):
+            self.llm_thinking_enabled = thinking_raw.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            self.llm_thinking_enabled = bool(thinking_raw)
         self.qwen35_reasoning_budget_enabled = bool(llm_cfg.get("qwen35_reasoning_budget_enabled", False))
         self.exposed_entities_prompt_limit = max(0, int(llm_cfg.get("exposed_entities_prompt_limit", 80)))
         logger.info(
-            "Automation planner external Ollama configured: host=%s, model=%s, system_prompt_chars=%s",
+            "Automation planner external Ollama configured: host=%s, model=%s, thinking=%s, qwen35_budget=%s, system_prompt_chars=%s",
             self.ollama_host,
             self.ollama_model,
+            self.llm_thinking_enabled,
+            self.qwen35_reasoning_budget_enabled,
             len(self.ollama_system_prompt),
         )
 
@@ -651,6 +668,40 @@ class HomeAssistantAutomationClient:
             except FileNotFoundError:
                 continue
 
+    @staticmethod
+    def _latest_backup_file(backup_dir: str, prefix: str) -> str | None:
+        try:
+            files = [
+                os.path.join(backup_dir, name)
+                for name in os.listdir(backup_dir)
+                if name.startswith(prefix) and name.endswith(".yaml.bak")
+            ]
+        except FileNotFoundError:
+            return None
+        if not files:
+            return None
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return files[0]
+
+    @staticmethod
+    def _restore_file_from_backup(target_path: str, backup_path: str) -> None:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        shutil.copy2(backup_path, target_path)
+
+    def _restore_latest_automation_backup(self) -> str | None:
+        latest = self._latest_backup_file(self.automation_backup_dir, "automations.")
+        if not latest:
+            return None
+        self._restore_file_from_backup(self.automations_path, latest)
+        return latest
+
+    def _restore_latest_script_backup(self) -> str | None:
+        latest = self._latest_backup_file(self.script_backup_dir, "scripts.")
+        if not latest:
+            return None
+        self._restore_file_from_backup(self.scripts_path, latest)
+        return latest
+
     def _ensure_ids(self, automations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         changed = False
         updated: list[dict[str, Any]] = []
@@ -926,7 +977,11 @@ class HomeAssistantAutomationClient:
         messages.append({"role": "user", "content": prompt_text})
 
         model_lower = self.ollama_model.lower()
-        use_qwen35_budget = self.qwen35_reasoning_budget_enabled and "qwen3.5" in model_lower
+        use_qwen35_budget = (
+            self.llm_thinking_enabled
+            and self.qwen35_reasoning_budget_enabled
+            and "qwen3.5" in model_lower
+        )
 
         if use_qwen35_budget:
             reason_payload = self._post_ollama_chat(
@@ -946,8 +1001,9 @@ class HomeAssistantAutomationClient:
 
             thinking = self._extract_ollama_thinking(reason_payload)
             final_prompt = (
-                "Review the reasoning above. Ignore any self-corrections or second-guessing. "
-                "What was the first conclusion reached? Return only the final answer."
+                "Review the reasoning above and provide the best final answer now. "
+                "Follow all previous instructions exactly, and return only the answer content "
+                "without any prefix or explanation."
             )
             direct_messages = list(messages)
             if thinking:
@@ -963,7 +1019,36 @@ class HomeAssistantAutomationClient:
                     "presence_penalty": 1.1,
                 },
             )
-            return self._extract_ollama_message_content(direct_payload)
+            direct_content = self._extract_ollama_message_content(direct_payload)
+
+            # Guard against common wording artifacts from some qwen3.5 responses.
+            artifact_prefixes = [
+                "the first conclusion reached was",
+                "first conclusion reached was",
+                "the conclusion reached was",
+            ]
+            lowered = direct_content.lower()
+            for prefix in artifact_prefixes:
+                if lowered.startswith(prefix):
+                    cleaned = direct_content[len(prefix):].lstrip(" :,-\t\n\r\"'“”")
+                    if cleaned:
+                        return cleaned
+                    break
+
+            return direct_content
+
+        if self.llm_thinking_enabled:
+            payload = self._post_ollama_chat(
+                messages=messages,
+                think="medium",
+                options={
+                    "temperature": 0.0,
+                    "top_p": 0.9,
+                    "top_k": 40,
+                    "num_predict": 512,
+                },
+            )
+            return self._extract_ollama_message_content(payload)
 
         payload = self._post_ollama_chat(
             messages=messages,
@@ -988,7 +1073,25 @@ class AutomationManager:
         | None = None,
     ):
         self.client = HomeAssistantAutomationClient(request_with_fallback=request_with_fallback)
-        self.pending = PendingActionStore(ttl_seconds=300)
+        self.pending = PendingActionStore(ttl_seconds=24 * 60 * 60)
+        self._confirm_queue = threading.Condition()
+        self._next_confirm_ticket = 0
+        self._serving_confirm_ticket = 0
+
+    def _run_confirm_serially(self, task: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Serialize confirm execution to preserve FIFO write/reload order."""
+        with self._confirm_queue:
+            ticket = self._next_confirm_ticket
+            self._next_confirm_ticket += 1
+            while ticket != self._serving_confirm_ticket:
+                self._confirm_queue.wait()
+
+        try:
+            return task()
+        finally:
+            with self._confirm_queue:
+                self._serving_confirm_ticket += 1
+                self._confirm_queue.notify_all()
 
     @staticmethod
     def _strip_meta(description: str) -> tuple[str, dict[str, Any]]:
@@ -1699,9 +1802,24 @@ class AutomationManager:
                             target["entity_id"] = cleaned_entity
 
                     if service == "scene.turn_on" and "entity_id" not in target:
-                        guessed_scene = ensure_inferred_scene_id()
-                        if guessed_scene:
-                            target["entity_id"] = guessed_scene
+                        data_raw = normalized_item.get("data")
+                        data_entity: Any = None
+                        if isinstance(data_raw, dict):
+                            data_entity = data_raw.get("entity_id")
+                        cleaned_data_entity = self._sanitize_entity_id_field(data_entity)
+                        if isinstance(cleaned_data_entity, str) and cleaned_data_entity.startswith("scene."):
+                            target["entity_id"] = cleaned_data_entity
+                        elif isinstance(cleaned_data_entity, list):
+                            first_scene = next(
+                                (v for v in cleaned_data_entity if isinstance(v, str) and v.startswith("scene.")),
+                                "",
+                            )
+                            if first_scene:
+                                target["entity_id"] = first_scene
+                        else:
+                            guessed_scene = ensure_inferred_scene_id()
+                            if guessed_scene:
+                                target["entity_id"] = guessed_scene
 
                     if target:
                         normalized_item["target"] = target
@@ -1709,9 +1827,24 @@ class AutomationManager:
                         normalized_item.pop("target", None)
 
                 if service == "scene.turn_on" and "target" not in normalized_item:
-                    guessed_scene = ensure_inferred_scene_id()
-                    if guessed_scene:
-                        normalized_item["target"] = {"entity_id": guessed_scene}
+                    data_raw = normalized_item.get("data")
+                    data_entity: Any = None
+                    if isinstance(data_raw, dict):
+                        data_entity = data_raw.get("entity_id")
+                    cleaned_data_entity = self._sanitize_entity_id_field(data_entity)
+                    if isinstance(cleaned_data_entity, str) and cleaned_data_entity.startswith("scene."):
+                        normalized_item["target"] = {"entity_id": cleaned_data_entity}
+                    elif isinstance(cleaned_data_entity, list):
+                        first_scene = next(
+                            (v for v in cleaned_data_entity if isinstance(v, str) and v.startswith("scene.")),
+                            "",
+                        )
+                        if first_scene:
+                            normalized_item["target"] = {"entity_id": first_scene}
+                    else:
+                        guessed_scene = ensure_inferred_scene_id()
+                        if guessed_scene:
+                            normalized_item["target"] = {"entity_id": guessed_scene}
 
                 if script_entity_target:
                     target = normalized_item.get("target")
@@ -2532,7 +2665,7 @@ class AutomationManager:
         self,
         text: str,
         expected_operation: str,
-        session_id: str,
+        session_id: str = "",
         language: str | None = None,
     ) -> dict[str, Any]:
         operation = "update" if expected_operation == "task_update" else "delete"
@@ -2559,7 +2692,6 @@ class AutomationManager:
         payload = {
             "resource_type": "automation",
             "operation": operation,
-            "session_id": str(session_id or "").strip(),
             "target_id": target_id,
             "target_alias": target_alias,
             "target_summary": match.summary,
@@ -2573,7 +2705,6 @@ class AutomationManager:
             "ok": True,
             "needs_confirmation": True,
             "confirmation_id": confirmation_id,
-            "session_id": str(session_id or "").strip(),
             "operation": operation,
             "match_score": round(match.score, 4),
             "target": {
@@ -2587,7 +2718,29 @@ class AutomationManager:
             ),
         }
 
-    def confirm_manage(self, confirmation_id: str, session_id: str) -> dict[str, Any]:
+    def manage_without_confirmation(
+        self,
+        text: str,
+        expected_operation: str,
+        session_id: str = "",
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        prepared = self.prepare_manage(
+            text=text,
+            expected_operation=expected_operation,
+            session_id=session_id,
+            language=language,
+        )
+        confirmation_id = str(prepared.get("confirmation_id") or "").strip()
+        if not confirmation_id:
+            raise AutomationError("failed to create confirmation for direct manage execution")
+        return self.confirm_manage(confirmation_id)
+
+    def confirm_manage(
+        self,
+        confirmation_id: str,
+        expected_operation: str | None = None,
+    ) -> dict[str, Any]:
         payload = self.pending.pop(confirmation_id)
         if not payload:
             raise AutomationError("confirmation_id invalid or expired")
@@ -2596,168 +2749,204 @@ class AutomationManager:
         if payload_type != "automation":
             raise AutomationError("confirmation_id is not for automation operation")
 
-        payload_session_id = str(payload.get("session_id") or "").strip()
-        request_session_id = str(session_id or "").strip()
-        if not request_session_id:
-            raise AutomationError("session_id is required for confirmation")
-        if payload_session_id and payload_session_id != request_session_id:
-            raise AutomationError("confirmation_id does not belong to current session")
+        operation = str(payload.get("operation") or "").strip()
+        if expected_operation:
+            op_raw = str(expected_operation or "").strip()
+            normalized_expected = "update" if op_raw == "task_update" else "delete" if op_raw == "task_delete" else ""
+            if not normalized_expected:
+                raise AutomationError("expected_operation must be task_update or task_delete")
+            if normalized_expected != operation:
+                raise AutomationError("confirmation_id does not match expected_operation")
 
-        operation = str(payload.get("operation") or "")
-        target_id = str(payload.get("target_id") or "")
-        target_alias = str(payload.get("target_alias") or "")
-        plan_raw = payload.get("plan")
-        plan: dict[str, Any] = plan_raw if isinstance(plan_raw, dict) else {}
-        input_text = str(payload.get("input_text") or "")
-        language = str(payload.get("language") or self.client.conversation_language)
+        def _task() -> dict[str, Any]:
+            target_id = str(payload.get("target_id") or "")
+            target_alias = str(payload.get("target_alias") or "")
+            plan_raw = payload.get("plan")
+            plan: dict[str, Any] = plan_raw if isinstance(plan_raw, dict) else {}
+            input_text = str(payload.get("input_text") or "")
+            language = str(payload.get("language") or self.client.conversation_language)
 
-        if operation == "delete":
-            self.client.delete_automation(target_id)
-            self.client.reload_automations()
-            return {
-                "ok": True,
-                "operation": "delete",
-                "automation_id": target_id,
-                "name": target_alias,
-                "message": f"已删除自动化: {target_alias}",
+            if operation == "delete":
+                try:
+                    self.client.delete_automation(target_id)
+                    self.client.reload_automations()
+                except Exception as exc:
+                    backup_used = self.client._restore_latest_automation_backup()
+                    if backup_used:
+                        try:
+                            self.client.reload_automations()
+                        except Exception as reload_exc:
+                            raise AutomationError(
+                                f"delete failed and rollback reload also failed: {reload_exc}",
+                                debug={"backup": backup_used, "cause": str(exc)},
+                            ) from reload_exc
+                        raise AutomationError(
+                            f"delete failed and rolled back from backup: {exc}",
+                            debug={"backup": backup_used},
+                        ) from exc
+                    raise AutomationError(f"delete failed: {exc}") from exc
+                return {
+                    "ok": True,
+                    "operation": "delete",
+                    "automation_id": target_id,
+                    "name": target_alias,
+                    "message": f"已删除自动化: {target_alias}",
+                }
+
+            if operation != "update":
+                raise AutomationError(f"unsupported pending operation: {operation}")
+
+            # Load latest target before applying update.
+            all_items = self._managed_automations()
+            current = next(
+                (
+                    item
+                    for item in all_items
+                    if str(item.get("id") or item.get("automation_id") or "") == target_id
+                ),
+                None,
+            )
+            if not current:
+                raise AutomationError("target automation not found before update")
+
+            current_alias = str(current.get("alias") or current.get("name") or "").strip()
+            current_description = str(current.get("description") or "")
+            clean_desc, meta = self._strip_meta(current_description)
+            ai_generated_before = bool(meta.get("ai_generated_name", False))
+
+            name_specified = bool(plan.get("name_specified", False))
+            requested_name = str(plan.get("new_name") or "").strip()
+            summary = str(plan.get("summary") or "").strip() or input_text
+
+            ai_generated_after = ai_generated_before
+            if name_specified and requested_name:
+                final_name = requested_name
+                if ai_generated_before:
+                    ai_generated_after = False
+            elif ai_generated_before:
+                final_name = self._generate_name(summary=summary, text=input_text, language=language)
+                ai_generated_after = True
+            else:
+                final_name = current_alias
+
+            trigger_plan = plan.get("trigger") if isinstance(plan.get("trigger"), list) and plan.get("trigger") else []
+            condition_plan = plan.get("condition") if isinstance(plan.get("condition"), list) and plan.get("condition") else []
+            action_plan = plan.get("action") if isinstance(plan.get("action"), list) and plan.get("action") else []
+
+            current_trigger = self._entry_triggers(current)
+            current_condition = self._entry_conditions(current)
+            current_action = self._entry_actions(current)
+
+            trigger = self._normalize_trigger_list(trigger_plan if trigger_plan else current_trigger, input_text)
+            condition = self._normalize_condition_list(condition_plan if condition_plan else current_condition)
+            action = self._normalize_action_list(action_plan if action_plan else current_action, input_text)
+            mode = str(plan.get("mode") or "").strip() or str(current.get("mode") or "single")
+
+            behavior_unchanged = (
+                final_name == current_alias
+                and self._json_like_equal(trigger, current_trigger)
+                and self._json_like_equal(condition, current_condition)
+                and self._json_like_equal(action, current_action)
+                and mode == str(current.get("mode") or "single")
+            )
+            if behavior_unchanged:
+                raise AutomationError(
+                    "no effective update was detected from this instruction; automation was not changed",
+                    debug={
+                        "phase": "update_noop",
+                        "target_id": target_id,
+                        "target_alias": target_alias,
+                        "plan": plan,
+                        "current": {
+                            "name": current_alias,
+                            "trigger": current_trigger,
+                            "condition": current_condition,
+                            "action": current_action,
+                            "mode": str(current.get("mode") or "single"),
+                        },
+                        "normalized": {
+                            "name": final_name,
+                            "trigger": trigger,
+                            "condition": condition,
+                            "action": action,
+                            "mode": mode,
+                        },
+                    },
+                )
+
+            update_dry_run_error = self._dry_run_validate_payload(trigger, condition, action, mode)
+            if update_dry_run_error is not None:
+                raise AutomationError(
+                    "automation update dry-run failed: "
+                    f"{update_dry_run_error}. Please provide clearer update instructions.",
+                    debug={
+                        "phase": "update_dry_run",
+                        "target_id": target_id,
+                        "target_alias": target_alias,
+                        "plan": plan,
+                        "normalized": {
+                            "trigger": trigger,
+                            "condition": condition,
+                            "action": action,
+                            "mode": mode,
+                        },
+                    },
+                )
+
+            updated_meta = {
+                "ai_generated_name": ai_generated_after,
+                "summary": summary,
+                "updated_at": int(time.time()),
+            }
+            description_base = clean_desc
+            description = self._build_description(description_base, updated_meta)
+
+            update_payload = {
+                "alias": final_name,
+                "description": description,
+                "trigger": trigger,
+                "condition": condition,
+                "action": action,
+                "mode": mode,
             }
 
-        if operation != "update":
-            raise AutomationError(f"unsupported pending operation: {operation}")
+            try:
+                self.client.update_automation(target_id, update_payload)
+                self.client.reload_automations()
+            except Exception as exc:
+                backup_used = self.client._restore_latest_automation_backup()
+                if backup_used:
+                    try:
+                        self.client.reload_automations()
+                    except Exception as reload_exc:
+                        raise AutomationError(
+                            f"update failed and rollback reload also failed: {reload_exc}",
+                            debug={"backup": backup_used, "cause": str(exc)},
+                        ) from reload_exc
+                    raise AutomationError(
+                        f"update failed and rolled back from backup: {exc}",
+                        debug={"backup": backup_used},
+                    ) from exc
+                raise AutomationError(f"update failed: {exc}") from exc
 
-        # Load latest target before applying update.
-        all_items = self._managed_automations()
-        current = next(
-            (
-                item
-                for item in all_items
-                if str(item.get("id") or item.get("automation_id") or "") == target_id
-            ),
-            None,
-        )
-        if not current:
-            raise AutomationError("target automation not found before update")
+            return {
+                "ok": True,
+                "operation": "update",
+                "automation_id": target_id,
+                "old_name": current_alias,
+                "name": final_name,
+                "ai_generated_name": ai_generated_after,
+                "summary": summary,
+                "message": f"已更新自动化: {current_alias} -> {final_name}",
+            }
 
-        current_alias = str(current.get("alias") or current.get("name") or "").strip()
-        current_description = str(current.get("description") or "")
-        clean_desc, meta = self._strip_meta(current_description)
-        ai_generated_before = bool(meta.get("ai_generated_name", False))
-
-        name_specified = bool(plan.get("name_specified", False))
-        requested_name = str(plan.get("new_name") or "").strip()
-        summary = str(plan.get("summary") or "").strip() or input_text
-
-        ai_generated_after = ai_generated_before
-        if name_specified and requested_name:
-            final_name = requested_name
-            if ai_generated_before:
-                ai_generated_after = False
-        elif ai_generated_before:
-            final_name = self._generate_name(summary=summary, text=input_text, language=language)
-            ai_generated_after = True
-        else:
-            final_name = current_alias
-
-        trigger_plan = plan.get("trigger") if isinstance(plan.get("trigger"), list) and plan.get("trigger") else []
-        condition_plan = plan.get("condition") if isinstance(plan.get("condition"), list) and plan.get("condition") else []
-        action_plan = plan.get("action") if isinstance(plan.get("action"), list) and plan.get("action") else []
-
-        current_trigger = self._entry_triggers(current)
-        current_condition = self._entry_conditions(current)
-        current_action = self._entry_actions(current)
-
-        trigger = self._normalize_trigger_list(trigger_plan if trigger_plan else current_trigger, input_text)
-        condition = self._normalize_condition_list(condition_plan if condition_plan else current_condition)
-        action = self._normalize_action_list(action_plan if action_plan else current_action, input_text)
-        mode = str(plan.get("mode") or "").strip() or str(current.get("mode") or "single")
-
-        behavior_unchanged = (
-            final_name == current_alias
-            and self._json_like_equal(trigger, current_trigger)
-            and self._json_like_equal(condition, current_condition)
-            and self._json_like_equal(action, current_action)
-            and mode == str(current.get("mode") or "single")
-        )
-        if behavior_unchanged:
-            raise AutomationError(
-                "no effective update was detected from this instruction; automation was not changed",
-                debug={
-                    "phase": "update_noop",
-                    "target_id": target_id,
-                    "target_alias": target_alias,
-                    "plan": plan,
-                    "current": {
-                        "name": current_alias,
-                        "trigger": current_trigger,
-                        "condition": current_condition,
-                        "action": current_action,
-                        "mode": str(current.get("mode") or "single"),
-                    },
-                    "normalized": {
-                        "name": final_name,
-                        "trigger": trigger,
-                        "condition": condition,
-                        "action": action,
-                        "mode": mode,
-                    },
-                },
-            )
-
-        update_dry_run_error = self._dry_run_validate_payload(trigger, condition, action, mode)
-        if update_dry_run_error is not None:
-            raise AutomationError(
-                "automation update dry-run failed: "
-                f"{update_dry_run_error}. Please provide clearer update instructions.",
-                debug={
-                    "phase": "update_dry_run",
-                    "target_id": target_id,
-                    "target_alias": target_alias,
-                    "plan": plan,
-                    "normalized": {
-                        "trigger": trigger,
-                        "condition": condition,
-                        "action": action,
-                        "mode": mode,
-                    },
-                },
-            )
-
-        updated_meta = {
-            "ai_generated_name": ai_generated_after,
-            "summary": summary,
-            "updated_at": int(time.time()),
-        }
-        description_base = clean_desc
-        description = self._build_description(description_base, updated_meta)
-
-        update_payload = {
-            "alias": final_name,
-            "description": description,
-            "trigger": trigger,
-            "condition": condition,
-            "action": action,
-            "mode": mode,
-        }
-
-        self.client.update_automation(target_id, update_payload)
-        self.client.reload_automations()
-
-        return {
-            "ok": True,
-            "operation": "update",
-            "automation_id": target_id,
-            "old_name": current_alias,
-            "name": final_name,
-            "ai_generated_name": ai_generated_after,
-            "summary": summary,
-            "message": f"已更新自动化: {current_alias} -> {final_name}",
-        }
+        return self._run_confirm_serially(_task)
 
     def prepare_manage_script(
         self,
         text: str,
         expected_operation: str,
-        session_id: str,
+        session_id: str = "",
         language: str | None = None,
     ) -> dict[str, Any]:
         operation = "update" if expected_operation == "task_update" else "delete"
@@ -2784,7 +2973,6 @@ class AutomationManager:
         payload = {
             "resource_type": "script",
             "operation": operation,
-            "session_id": str(session_id or "").strip(),
             "target_id": target_id,
             "target_alias": target_alias,
             "target_summary": match.summary,
@@ -2798,7 +2986,6 @@ class AutomationManager:
             "ok": True,
             "needs_confirmation": True,
             "confirmation_id": confirmation_id,
-            "session_id": str(session_id or "").strip(),
             "operation": operation,
             "resource_type": "script",
             "match_score": round(match.score, 4),
@@ -2813,7 +3000,29 @@ class AutomationManager:
             ),
         }
 
-    def confirm_manage_script(self, confirmation_id: str, session_id: str) -> dict[str, Any]:
+    def manage_script_without_confirmation(
+        self,
+        text: str,
+        expected_operation: str,
+        session_id: str = "",
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        prepared = self.prepare_manage_script(
+            text=text,
+            expected_operation=expected_operation,
+            session_id=session_id,
+            language=language,
+        )
+        confirmation_id = str(prepared.get("confirmation_id") or "").strip()
+        if not confirmation_id:
+            raise AutomationError("failed to create confirmation for direct script manage execution")
+        return self.confirm_manage_script(confirmation_id)
+
+    def confirm_manage_script(
+        self,
+        confirmation_id: str,
+        expected_operation: str | None = None,
+    ) -> dict[str, Any]:
         payload = self.pending.pop(confirmation_id)
         if not payload:
             raise AutomationError("confirmation_id invalid or expired")
@@ -2822,148 +3031,180 @@ class AutomationManager:
         if payload_type != "script":
             raise AutomationError("confirmation_id is not for script operation")
 
-        payload_session_id = str(payload.get("session_id") or "").strip()
-        request_session_id = str(session_id or "").strip()
-        if not request_session_id:
-            raise AutomationError("session_id is required for confirmation")
-        if payload_session_id and payload_session_id != request_session_id:
-            raise AutomationError("confirmation_id does not belong to current session")
+        operation = str(payload.get("operation") or "").strip()
+        if expected_operation:
+            op_raw = str(expected_operation or "").strip()
+            normalized_expected = "update" if op_raw == "task_update" else "delete" if op_raw == "task_delete" else ""
+            if not normalized_expected:
+                raise AutomationError("expected_operation must be task_update or task_delete")
+            if normalized_expected != operation:
+                raise AutomationError("confirmation_id does not match expected_operation")
 
-        operation = str(payload.get("operation") or "")
-        target_id = str(payload.get("target_id") or "")
-        target_alias = str(payload.get("target_alias") or "")
-        plan_raw = payload.get("plan")
-        plan: dict[str, Any] = plan_raw if isinstance(plan_raw, dict) else {}
-        input_text = str(payload.get("input_text") or "")
-        language = str(payload.get("language") or self.client.conversation_language)
+        def _task() -> dict[str, Any]:
+            target_id = str(payload.get("target_id") or "")
+            target_alias = str(payload.get("target_alias") or "")
+            plan_raw = payload.get("plan")
+            plan: dict[str, Any] = plan_raw if isinstance(plan_raw, dict) else {}
+            input_text = str(payload.get("input_text") or "")
+            language = str(payload.get("language") or self.client.conversation_language)
 
-        if operation == "delete":
-            self.client.delete_script(target_id)
-            self.client.reload_scripts()
-            return {
-                "ok": True,
-                "operation": "delete_script",
-                "script_id": target_id,
-                "name": target_alias,
-                "message": f"已删除脚本: {target_alias}",
+            if operation == "delete":
+                try:
+                    self.client.delete_script(target_id)
+                    self.client.reload_scripts()
+                except Exception as exc:
+                    backup_used = self.client._restore_latest_script_backup()
+                    if backup_used:
+                        try:
+                            self.client.reload_scripts()
+                        except Exception as reload_exc:
+                            raise AutomationError(
+                                f"delete script failed and rollback reload also failed: {reload_exc}",
+                                debug={"backup": backup_used, "cause": str(exc)},
+                            ) from reload_exc
+                        raise AutomationError(
+                            f"delete script failed and rolled back from backup: {exc}",
+                            debug={"backup": backup_used},
+                        ) from exc
+                    raise AutomationError(f"delete script failed: {exc}") from exc
+                return {
+                    "ok": True,
+                    "operation": "delete_script",
+                    "script_id": target_id,
+                    "name": target_alias,
+                    "message": f"已删除脚本: {target_alias}",
+                }
+
+            if operation != "update":
+                raise AutomationError(f"unsupported pending operation: {operation}")
+
+            all_items = self._managed_scripts()
+            current = next(
+                (
+                    item
+                    for item in all_items
+                    if str(item.get("script_id") or "") == target_id
+                ),
+                None,
+            )
+            if not current:
+                raise AutomationError("target script not found before update")
+
+            current_alias = str(current.get("alias") or target_id).strip()
+            current_description = str(current.get("description") or "")
+            clean_desc, meta = self._strip_meta(current_description)
+            ai_generated_before = bool(meta.get("ai_generated_name", False))
+
+            name_specified = bool(plan.get("name_specified", False))
+            requested_name = str(plan.get("new_name") or "").strip()
+            summary = str(plan.get("summary") or "").strip() or input_text
+
+            ai_generated_after = ai_generated_before
+            if name_specified and requested_name:
+                final_name = requested_name
+                if ai_generated_before:
+                    ai_generated_after = False
+            elif ai_generated_before:
+                final_name = self._generate_name(summary=summary, text=input_text, language=language)
+                ai_generated_after = True
+            else:
+                final_name = current_alias
+
+            sequence_plan = plan.get("sequence") if isinstance(plan.get("sequence"), list) and plan.get("sequence") else []
+            current_sequence = self._entry_sequence(current)
+            sequence = self._normalize_action_list(sequence_plan if sequence_plan else current_sequence, input_text)
+            mode = str(plan.get("mode") or "").strip() or str(current.get("mode") or "single")
+
+            behavior_unchanged = (
+                final_name == current_alias
+                and self._json_like_equal(sequence, current_sequence)
+                and mode == str(current.get("mode") or "single")
+            )
+            if behavior_unchanged:
+                raise AutomationError(
+                    "no effective update was detected from this instruction; script was not changed",
+                    debug={
+                        "phase": "update_script_noop",
+                        "target_id": target_id,
+                        "target_alias": target_alias,
+                        "plan": plan,
+                        "current": {
+                            "name": current_alias,
+                            "sequence": current_sequence,
+                            "mode": str(current.get("mode") or "single"),
+                        },
+                        "normalized": {
+                            "name": final_name,
+                            "sequence": sequence,
+                            "mode": mode,
+                        },
+                    },
+                )
+
+            update_dry_run_error = self._dry_run_validate_script_payload(sequence, mode)
+            if update_dry_run_error is not None:
+                raise AutomationError(
+                    "script update dry-run failed: "
+                    f"{update_dry_run_error}. Please provide clearer update instructions.",
+                    debug={
+                        "phase": "update_script_dry_run",
+                        "target_id": target_id,
+                        "target_alias": target_alias,
+                        "plan": plan,
+                        "normalized": {
+                            "sequence": sequence,
+                            "mode": mode,
+                        },
+                    },
+                )
+
+            updated_meta = {
+                "ai_generated_name": ai_generated_after,
+                "summary": summary,
+                "updated_at": int(time.time()),
+            }
+            description = self._build_description(clean_desc, updated_meta)
+
+            update_payload = {
+                "alias": final_name,
+                "description": description,
+                "sequence": sequence,
+                "mode": mode,
             }
 
-        if operation != "update":
-            raise AutomationError(f"unsupported pending operation: {operation}")
+            try:
+                self.client.update_script(target_id, update_payload)
+                self.client.reload_scripts()
+            except Exception as exc:
+                backup_used = self.client._restore_latest_script_backup()
+                if backup_used:
+                    try:
+                        self.client.reload_scripts()
+                    except Exception as reload_exc:
+                        raise AutomationError(
+                            f"update script failed and rollback reload also failed: {reload_exc}",
+                            debug={"backup": backup_used, "cause": str(exc)},
+                        ) from reload_exc
+                    raise AutomationError(
+                        f"update script failed and rolled back from backup: {exc}",
+                        debug={"backup": backup_used},
+                    ) from exc
+                raise AutomationError(f"update script failed: {exc}") from exc
 
-        all_items = self._managed_scripts()
-        current = next(
-            (
-                item
-                for item in all_items
-                if str(item.get("script_id") or "") == target_id
-            ),
-            None,
-        )
-        if not current:
-            raise AutomationError("target script not found before update")
+            return {
+                "ok": True,
+                "operation": "update_script",
+                "script_id": target_id,
+                "old_name": current_alias,
+                "name": final_name,
+                "ai_generated_name": ai_generated_after,
+                "summary": summary,
+                "message": f"已更新脚本: {current_alias} -> {final_name}",
+            }
 
-        current_alias = str(current.get("alias") or target_id).strip()
-        current_description = str(current.get("description") or "")
-        clean_desc, meta = self._strip_meta(current_description)
-        ai_generated_before = bool(meta.get("ai_generated_name", False))
+        return self._run_confirm_serially(_task)
 
-        name_specified = bool(plan.get("name_specified", False))
-        requested_name = str(plan.get("new_name") or "").strip()
-        summary = str(plan.get("summary") or "").strip() or input_text
-
-        ai_generated_after = ai_generated_before
-        if name_specified and requested_name:
-            final_name = requested_name
-            if ai_generated_before:
-                ai_generated_after = False
-        elif ai_generated_before:
-            final_name = self._generate_name(summary=summary, text=input_text, language=language)
-            ai_generated_after = True
-        else:
-            final_name = current_alias
-
-        sequence_plan = plan.get("sequence") if isinstance(plan.get("sequence"), list) and plan.get("sequence") else []
-        current_sequence = self._entry_sequence(current)
-        sequence = self._normalize_action_list(sequence_plan if sequence_plan else current_sequence, input_text)
-        mode = str(plan.get("mode") or "").strip() or str(current.get("mode") or "single")
-
-        behavior_unchanged = (
-            final_name == current_alias
-            and self._json_like_equal(sequence, current_sequence)
-            and mode == str(current.get("mode") or "single")
-        )
-        if behavior_unchanged:
-            raise AutomationError(
-                "no effective update was detected from this instruction; script was not changed",
-                debug={
-                    "phase": "update_script_noop",
-                    "target_id": target_id,
-                    "target_alias": target_alias,
-                    "plan": plan,
-                    "current": {
-                        "name": current_alias,
-                        "sequence": current_sequence,
-                        "mode": str(current.get("mode") or "single"),
-                    },
-                    "normalized": {
-                        "name": final_name,
-                        "sequence": sequence,
-                        "mode": mode,
-                    },
-                },
-            )
-
-        update_dry_run_error = self._dry_run_validate_script_payload(sequence, mode)
-        if update_dry_run_error is not None:
-            raise AutomationError(
-                "script update dry-run failed: "
-                f"{update_dry_run_error}. Please provide clearer update instructions.",
-                debug={
-                    "phase": "update_script_dry_run",
-                    "target_id": target_id,
-                    "target_alias": target_alias,
-                    "plan": plan,
-                    "normalized": {
-                        "sequence": sequence,
-                        "mode": mode,
-                    },
-                },
-            )
-
-        updated_meta = {
-            "ai_generated_name": ai_generated_after,
-            "summary": summary,
-            "updated_at": int(time.time()),
-        }
-        description = self._build_description(clean_desc, updated_meta)
-
-        update_payload = {
-            "alias": final_name,
-            "description": description,
-            "sequence": sequence,
-            "mode": mode,
-        }
-
-        self.client.update_script(target_id, update_payload)
-        self.client.reload_scripts()
-
-        return {
-            "ok": True,
-            "operation": "update_script",
-            "script_id": target_id,
-            "old_name": current_alias,
-            "name": final_name,
-            "ai_generated_name": ai_generated_after,
-            "summary": summary,
-            "message": f"已更新脚本: {current_alias} -> {final_name}",
-        }
-
-    def confirm_latest_manage(self, session_id: str, expected_operation: str | None = None) -> dict[str, Any]:
-        session = str(session_id or "").strip()
-        if not session:
-            raise AutomationError("session_id is required for confirmation")
-
+    def confirm_latest_manage(self, expected_operation: str | None = None) -> dict[str, Any]:
         operation: str | None = None
         if expected_operation:
             op_raw = str(expected_operation or "").strip()
@@ -2975,31 +3216,26 @@ class AutomationManager:
                 raise AutomationError("expected_operation must be task_update or task_delete")
 
         if operation is None:
-            pending_count = self.pending.count(session_id=session, resource_type="automation")
+            pending_count = self.pending.count(resource_type="automation")
             if pending_count > 1:
                 raise AutomationError(
-                    "multiple pending automation confirmations exist in current session; "
+                    "multiple pending automation confirmations exist; "
                     "please confirm with confirmation_id or expected_operation"
                 )
 
         latest = self.pending.pop_latest(
             operation=operation,
-            session_id=session,
             resource_type="automation",
         )
         if not latest:
             if operation:
-                raise AutomationError("no pending automation confirmation found for current session and operation")
-            raise AutomationError("no pending automation confirmation found for current session")
+                raise AutomationError("no pending automation confirmation found for operation")
+            raise AutomationError("no pending automation confirmation found")
 
         token, _ = latest
-        return self.confirm_manage(token, session_id=session)
+        return self.confirm_manage(token)
 
-    def confirm_latest_manage_script(self, session_id: str, expected_operation: str | None = None) -> dict[str, Any]:
-        session = str(session_id or "").strip()
-        if not session:
-            raise AutomationError("session_id is required for confirmation")
-
+    def confirm_latest_manage_script(self, expected_operation: str | None = None) -> dict[str, Any]:
         operation: str | None = None
         if expected_operation:
             op_raw = str(expected_operation or "").strip()
@@ -3011,22 +3247,21 @@ class AutomationManager:
                 raise AutomationError("expected_operation must be task_update or task_delete")
 
         if operation is None:
-            pending_count = self.pending.count(session_id=session, resource_type="script")
+            pending_count = self.pending.count(resource_type="script")
             if pending_count > 1:
                 raise AutomationError(
-                    "multiple pending script confirmations exist in current session; "
+                    "multiple pending script confirmations exist; "
                     "please confirm with confirmation_id or expected_operation"
                 )
 
         latest = self.pending.pop_latest(
             operation=operation,
-            session_id=session,
             resource_type="script",
         )
         if not latest:
             if operation:
-                raise AutomationError("no pending script confirmation found for current session and operation")
-            raise AutomationError("no pending script confirmation found for current session")
+                raise AutomationError("no pending script confirmation found for operation")
+            raise AutomationError("no pending script confirmation found")
 
         token, _ = latest
-        return self.confirm_manage_script(token, session_id=session)
+        return self.confirm_manage_script(token)

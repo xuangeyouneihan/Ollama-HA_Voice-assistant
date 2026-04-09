@@ -86,8 +86,8 @@ class CreateScriptRequest(BaseModel):
 class ManageAutomationRequest(BaseModel):
     text: str = ""
     expected_operation: str
-    session_id: str
     language: str | None = None
+    skip_confirmation: bool = False
     confirmation_id: str | None = None
     confirm: bool = False
 
@@ -95,14 +95,14 @@ class ManageAutomationRequest(BaseModel):
 class ManageScriptRequest(BaseModel):
     text: str = ""
     expected_operation: str
-    session_id: str
     language: str | None = None
+    skip_confirmation: bool = False
     confirmation_id: str | None = None
     confirm: bool = False
 
 
 class ConfirmManageRequest(BaseModel):
-    session_id: str
+    confirmation_id: str
     expected_operation: str | None = None
 
 
@@ -219,27 +219,32 @@ async def manage_automation_from_text(req: ManageAutomationRequest):
         _log_json_response("/ha-tasks/manage-from-text", 400, "expected_operation must be task_update or task_delete")
         raise HTTPException(status_code=400, detail="expected_operation must be task_update or task_delete")
 
-    session_id = (req.session_id or "").strip()
-    if not session_id:
-        _log_bad_request("/ha-tasks/manage-from-text", "session_id is required")
-        _log_json_response("/ha-tasks/manage-from-text", 400, "session_id is required")
-        raise HTTPException(status_code=400, detail="session_id is required")
-
     try:
         manager = get_automation_manager()
-        if req.confirm or req.confirmation_id:
+        if req.skip_confirmation:
+            result = manager.manage_without_confirmation(
+                text=req.text,
+                expected_operation=op,
+                language=req.language,
+            )
+            _log_json_response("/ha-tasks/manage-from-text", 200, result)
+            return result
+
+        if req.confirm:
             if not req.confirmation_id:
                 _log_bad_request("/ha-tasks/manage-from-text", "confirmation_id required for confirmation")
                 _log_json_response("/ha-tasks/manage-from-text", 400, "confirmation_id required for confirmation")
                 raise HTTPException(status_code=400, detail="confirmation_id required for confirmation")
-            result = manager.confirm_manage(req.confirmation_id, session_id=session_id)
+            result = manager.confirm_manage(
+                req.confirmation_id,
+                expected_operation=op,
+            )
             _log_json_response("/ha-tasks/manage-from-text", 200, result)
             return result
 
         result = manager.prepare_manage(
             text=req.text,
             expected_operation=op,
-            session_id=session_id,
             language=req.language,
         )
         _log_json_response("/ha-tasks/manage-from-text", 200, result)
@@ -272,27 +277,32 @@ async def manage_script_from_text(req: ManageScriptRequest):
         _log_json_response("/ha-scripts/manage-from-text", 400, "expected_operation must be task_update or task_delete")
         raise HTTPException(status_code=400, detail="expected_operation must be task_update or task_delete")
 
-    session_id = (req.session_id or "").strip()
-    if not session_id:
-        _log_bad_request("/ha-scripts/manage-from-text", "session_id is required")
-        _log_json_response("/ha-scripts/manage-from-text", 400, "session_id is required")
-        raise HTTPException(status_code=400, detail="session_id is required")
-
     try:
         manager = get_automation_manager()
-        if req.confirm or req.confirmation_id:
+        if req.skip_confirmation:
+            result = manager.manage_script_without_confirmation(
+                text=req.text,
+                expected_operation=op,
+                language=req.language,
+            )
+            _log_json_response("/ha-scripts/manage-from-text", 200, result)
+            return result
+
+        if req.confirm:
             if not req.confirmation_id:
                 _log_bad_request("/ha-scripts/manage-from-text", "confirmation_id required for confirmation")
                 _log_json_response("/ha-scripts/manage-from-text", 400, "confirmation_id required for confirmation")
                 raise HTTPException(status_code=400, detail="confirmation_id required for confirmation")
-            result = manager.confirm_manage_script(req.confirmation_id, session_id=session_id)
+            result = manager.confirm_manage_script(
+                req.confirmation_id,
+                expected_operation=op,
+            )
             _log_json_response("/ha-scripts/manage-from-text", 200, result)
             return result
 
         result = manager.prepare_manage_script(
             text=req.text,
             expected_operation=op,
-            session_id=session_id,
             language=req.language,
         )
         _log_json_response("/ha-scripts/manage-from-text", 200, result)
@@ -319,12 +329,6 @@ async def manage_script_from_text(req: ManageScriptRequest):
 @app.post("/ha-tasks/confirm")
 async def confirm_automation_manage(req: ConfirmManageRequest):
     _log_incoming_request("/ha-tasks/confirm", req)
-    session_id = (req.session_id or "").strip()
-    if not session_id:
-        _log_bad_request("/ha-tasks/confirm", "session_id is required")
-        _log_json_response("/ha-tasks/confirm", 400, "session_id is required")
-        raise HTTPException(status_code=400, detail="session_id is required")
-
     op = (req.expected_operation or "").strip() if req.expected_operation else ""
     if op and op not in {"task_update", "task_delete"}:
         _log_bad_request("/ha-tasks/confirm", "expected_operation must be task_update or task_delete")
@@ -333,7 +337,10 @@ async def confirm_automation_manage(req: ConfirmManageRequest):
 
     try:
         manager = get_automation_manager()
-        result = manager.confirm_latest_manage(session_id=session_id, expected_operation=op or None)
+        result = manager.confirm_manage(
+            req.confirmation_id,
+            expected_operation=op or None,
+        )
         _log_json_response("/ha-tasks/confirm", 200, result)
         return result
     except AutomationError as exc:
@@ -356,12 +363,6 @@ async def confirm_automation_manage(req: ConfirmManageRequest):
 @app.post("/ha-scripts/confirm")
 async def confirm_script_manage(req: ConfirmManageRequest):
     _log_incoming_request("/ha-scripts/confirm", req)
-    session_id = (req.session_id or "").strip()
-    if not session_id:
-        _log_bad_request("/ha-scripts/confirm", "session_id is required")
-        _log_json_response("/ha-scripts/confirm", 400, "session_id is required")
-        raise HTTPException(status_code=400, detail="session_id is required")
-
     op = (req.expected_operation or "").strip() if req.expected_operation else ""
     if op and op not in {"task_update", "task_delete"}:
         _log_bad_request("/ha-scripts/confirm", "expected_operation must be task_update or task_delete")
@@ -370,7 +371,10 @@ async def confirm_script_manage(req: ConfirmManageRequest):
 
     try:
         manager = get_automation_manager()
-        result = manager.confirm_latest_manage_script(session_id=session_id, expected_operation=op or None)
+        result = manager.confirm_manage_script(
+            req.confirmation_id,
+            expected_operation=op or None,
+        )
         _log_json_response("/ha-scripts/confirm", 200, result)
         return result
     except AutomationError as exc:

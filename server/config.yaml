@@ -7,14 +7,14 @@ server:
 
 llm:
   engine: ollama
-  model: qwen3.5:9b
+  model: qwen3:8b
   host: http://localhost:11434
   thinking: false
   # Enable two-step reasoning budget flow for qwen3.5 models to reduce overthinking loops.
-  qwen35_reasoning_budget_enabled: true
+  qwen35_reasoning_budget_enabled: false
   # Maximum exposed entities appended into planning prompt context.
   exposed_entities_prompt_limit: 80
-  temperature: 0.6
+  temperature: 0
   max_tokens: 500
   timeout: 120
   system_prompt: |
@@ -73,7 +73,6 @@ llm:
 
     native_match_automation rule:
     - Choose target_id only from provided candidates.
-    - If confidence < 0.45, set target_id="" and confidence=0.
 
 home_assistant:
   enabled: true
