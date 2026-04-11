@@ -1,8 +1,6 @@
 """Shared Home Assistant fallback helpers.
 
-This module centralizes:
-- HA HTTP request fallback for name resolution issues
-- Assist pipeline output normalization and fallback policy
+This module centralizes HA HTTP request fallback for name resolution issues.
 """
 
 from __future__ import annotations
@@ -12,8 +10,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
-
-from modules import ha_client
 
 logger = logging.getLogger(__name__)
 
@@ -86,37 +82,3 @@ def request_ha_with_fallback(
     raise requests.RequestException(last_error)
 
 
-def normalize_assist_result(assist_result: dict[str, Any]) -> dict[str, Any]:
-    ok = bool(assist_result.get("ok", False))
-    message = str(assist_result.get("message") or "").strip()
-    transcript = str(assist_result.get("transcript") or "").strip()
-    response_text = str(assist_result.get("response_text") or "").strip()
-
-    tts_audio = assist_result.get("tts_audio") or b""
-    tts_rate = int(assist_result.get("tts_sample_rate") or 0)
-    tts_width = int(assist_result.get("tts_sample_width") or 0)
-    tts_channels = int(assist_result.get("tts_channels") or 0)
-
-    has_playable_tts = bool(tts_audio and tts_rate > 0 and tts_width > 0 and tts_channels > 0)
-    fallback_text = response_text if response_text else "Okay"
-
-    return {
-        "ok": ok,
-        "message": message,
-        "transcript": transcript,
-        "response_text": response_text,
-        "tts_audio": tts_audio,
-        "tts_sample_rate": tts_rate,
-        "tts_sample_width": tts_width,
-        "tts_channels": tts_channels,
-        "has_playable_tts": has_playable_tts,
-        "fallback_text": fallback_text,
-    }
-
-
-async def run_assist_pipeline_with_fallback(audio_data: bytes, sample_rate: int) -> dict[str, Any]:
-    assist_result = await ha_client.process_audio_with_assist_pipeline(
-        audio_data,
-        sample_rate=sample_rate,
-    )
-    return normalize_assist_result(assist_result)

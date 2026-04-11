@@ -91,30 +91,8 @@ home_assistant:
   automation_auto_expose_default: true
   # Restrict update/delete matching to automations exposed to Assist conversation.
   manage_only_exposed_automations: true
-  # Audio requests are always forwarded to HA Assist pipeline.
-  # Optional pipeline id. Leave empty to use HA default Assist pipeline.
-  assist_pipeline_id: ""
-  # Timeout for HA Assist websocket run.
-  assist_audio_timeout_s: 45
   auto_discover: true
-  automation_conversation_agent: conversation.automation_manager
   automation_api_timeout_s: 60
-
-audio:
-  sample_rate: 44100
-  input_channels: 1
-  output_channels: 2
-  input_device: 6
-  output_device: 6
-  format: int16
-  # 0 means host picks the optimal blocksize automatically.
-  # This often reduces input_overflow on startup for USB/Pulse/ALSA devices.
-  buffer_size: 0
-  # Ignore transient startup overflow warnings in the first N ms.
-  overflow_grace_ms: 300
-  monitor_input: false
-  input_gain: 1
-  start_drop_ms: 0
 
 logging:
   level: INFO

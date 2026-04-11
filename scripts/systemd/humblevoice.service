@@ -1,0 +1,17 @@
+[Unit]
+Description=HumbleVoice FastAPI Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PROJECT_ROOT__/server
+ExecStart=__PROJECT_ROOT__/.venv/bin/python __PROJECT_ROOT__/server/main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

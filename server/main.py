@@ -1,18 +1,14 @@
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import logging
 from contextlib import asynccontextmanager
 
-from config_loader import get_config
 from modules.automation_manager import AutomationError, AutomationManager
-from modules.ha_fallback import request_ha_with_fallback, run_assist_pipeline_with_fallback
+from modules.ha_fallback import request_ha_with_fallback
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-cfg = get_config()
-audio_cfg = cfg.get("audio", {}) if cfg else {}
-ASSIST_INPUT_SAMPLE_RATE = int(audio_cfg.get("sample_rate", 16000))
 automation_manager: AutomationManager | None = None
 
 
@@ -54,12 +50,6 @@ async def lifespan(_: FastAPI):
     try:
         manager = get_automation_manager()
         result = manager.run_conversation_self_check()
-        if bool(result.get("uses_default_agent", False)):
-            logger.warning(
-                "automation_conversation_agent is not configured; using default conversation agent: %s",
-                result.get("agent"),
-            )
-
         if bool(result.get("ok", False)):
             logger.info("Conversation self-check passed: %s", result.get("message"))
         else:
@@ -70,7 +60,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="HumbleVoice Server (ESP32 Bridge)", lifespan=lifespan)
+app = FastAPI(title="HumbleVoice Automation and Script Manager", lifespan=lifespan)
 
 
 class CreateAutomationRequest(BaseModel):
@@ -106,60 +96,14 @@ class ConfirmManageRequest(BaseModel):
     expected_operation: str | None = None
 
 
-@app.websocket("/audio")
-async def audio_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    logger.info("ESP32 client connected")
-
-    try:
-        while True:
-            audio_data = await websocket.receive_bytes()
-            logger.info("Received %s bytes of audio data", len(audio_data))
-
-            flow = await run_assist_pipeline_with_fallback(
-                audio_data,
-                sample_rate=ASSIST_INPUT_SAMPLE_RATE,
-            )
-            if not bool(flow.get("ok", False)):
-                message = str(flow.get("message") or "assist pipeline request failed")
-                logger.error("Assist request failed: %s", message)
-                await websocket.send_text("Assist request failed")
-                continue
-
-            transcript = str(flow.get("transcript") or "").strip()
-            if transcript:
-                logger.info("Assist transcript: %s", transcript)
-
-            response_text = str(flow.get("response_text") or "").strip()
-            if response_text:
-                logger.info("Assist response: %s", response_text)
-
-            audio_response = flow.get("tts_audio") or b""
-            if bool(flow.get("has_playable_tts", False)):
-                await websocket.send_bytes(audio_response)
-                logger.info("Sent %s bytes of Assist TTS audio response", len(audio_response))
-            elif response_text:
-                await websocket.send_text(response_text)
-                logger.warning("Assist returned no playable TTS audio, sent text response instead")
-            else:
-                await websocket.send_text(str(flow.get("fallback_text") or "Okay"))
-                logger.warning("Assist returned neither audio nor text, sent fallback acknowledgment")
-
-    except Exception as exc:
-        logger.error("WebSocket error: %s", exc)
-    finally:
-        await websocket.close()
-        logger.info("ESP32 client disconnected")
-
-
 @app.get("/")
 async def root():
-    return {"message": "HumbleVoice ESP32 bridge running", "status": "ok"}
+    return {"message": "HumbleVoice automation/script manager running", "status": "ok"}
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "humblevoice-esp32-bridge"}
+    return {"status": "healthy", "service": "humblevoice-automation-script-manager"}
 
 
 @app.post("/ha-tasks/from-text")

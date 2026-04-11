@@ -2,7 +2,7 @@
 
 This module provides create/update/delete flows backed by Home Assistant APIs,
 including:
-- optional AI-generated names using HA conversation agent
+- optional AI-generated names using external Ollama
 - metadata marker for AI-generated names
 - two-step confirmation for update/delete
 - relevance matching based on name + content
@@ -152,11 +152,6 @@ class HomeAssistantAutomationClient:
         self.token = str(ha_cfg.get("token", "")).strip()
         self.timeout = float(ha_cfg.get("automation_api_timeout_s", 20))
         self.conversation_language = str(ha_cfg.get("conversation_language", "zh")).strip() or "zh"
-        # Prefer the new key `automation_conversation_agent`, keep legacy fallback for compatibility.
-        self.conversation_agent_id = str(
-            ha_cfg.get("automation_conversation_agent")
-            or ha_cfg.get("conversation_agent_id", "")
-        ).strip()
         self.config_dir = os.path.abspath(
             str(ha_cfg.get("config_dir", "/var/lib/homeassistant/homeassistant")).strip()
         )
@@ -210,14 +205,6 @@ class HomeAssistantAutomationClient:
             "Content-Type": "application/json",
         }
         self._request_with_fallback = request_with_fallback
-
-    @property
-    def uses_default_conversation_agent(self) -> bool:
-        return not bool(self.conversation_agent_id)
-
-    @property
-    def conversation_agent_label(self) -> str:
-        return "default(home_assistant)" if self.uses_default_conversation_agent else self.conversation_agent_id
 
     def _request(self, method: str, path: str, json_body: dict[str, Any] | None = None) -> requests.Response:
         try:
@@ -1164,11 +1151,10 @@ class AutomationManager:
         return any(p in raw for p in patterns)
 
     def run_conversation_self_check(self) -> dict[str, Any]:
-        """Best-effort startup check for conversation planning capability."""
+        """Best-effort startup check for external Ollama planning capability."""
         status = {
             "ok": False,
-            "agent": self.client.conversation_agent_label,
-            "uses_default_agent": self.client.uses_default_conversation_agent,
+            "mode": "external_ollama",
             "message": "",
         }
 
@@ -1179,19 +1165,19 @@ class AutomationManager:
         try:
             raw = self.client.ask_conversation(prompt, language=self.client.conversation_language)
         except Exception as exc:
-            status["message"] = f"conversation API unavailable: {exc}"
+            status["message"] = f"external ollama API unavailable: {exc}"
             return status
 
         parsed = self._extract_json_block(raw)
         if isinstance(parsed, dict) and str(parsed.get("ping") or "").lower() == "pong":
             status["ok"] = True
-            status["message"] = "conversation self-check passed"
+            status["message"] = "external ollama self-check passed"
             return status
 
         if self._looks_like_agent_failure_text(raw):
-            status["message"] = "conversation agent returned fallback text, not structured JSON"
+            status["message"] = "external ollama returned fallback text, not structured JSON"
         else:
-            status["message"] = "conversation agent response is not valid planning JSON"
+            status["message"] = "external ollama response is not valid planning JSON"
         return status
 
     @staticmethod
@@ -2241,14 +2227,9 @@ class AutomationManager:
         )
 
         if not parsed:
-            if self.client.uses_default_conversation_agent:
-                raise AutomationError(
-                    "default conversation agent cannot produce structured planning JSON for this request. "
-                    "Please configure home_assistant.automation_conversation_agent to an LLM-capable agent."
-                )
             raise AutomationError(
-                "conversation agent did not return structured JSON for automation planning. "
-                "Please configure home_assistant.automation_conversation_agent to an LLM-capable agent."
+                "external Ollama did not return structured JSON for automation planning. "
+                "Please adjust llm.model/system_prompt and retry."
             )
 
         result = {
@@ -2313,14 +2294,9 @@ class AutomationManager:
         )
 
         if not parsed:
-            if self.client.uses_default_conversation_agent:
-                raise AutomationError(
-                    "default conversation agent cannot produce structured planning JSON for this request. "
-                    "Please configure home_assistant.automation_conversation_agent to an LLM-capable agent."
-                )
             raise AutomationError(
-                "conversation agent did not return structured JSON for script planning. "
-                "Please configure home_assistant.automation_conversation_agent to an LLM-capable agent."
+                "external Ollama did not return structured JSON for script planning. "
+                "Please adjust llm.model/system_prompt and retry."
             )
 
         result = {
