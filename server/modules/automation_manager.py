@@ -400,6 +400,18 @@ class HomeAssistantAutomationClient:
             }
         )
 
+    def remove_entity_registry_entity(self, entity_id: str) -> None:
+        clean_entity_id = str(entity_id or "").strip()
+        if not clean_entity_id:
+            raise AutomationError("entity_id is empty for entity registry remove")
+
+        self._ws_send_command(
+            {
+                "type": "config/entity_registry/remove",
+                "entity_id": clean_entity_id,
+            }
+        )
+
     def list_exposed_entities(self) -> dict[str, dict[str, bool]]:
         result = self._ws_send_command({"type": "homeassistant/expose_entity/list"})
         if not isinstance(result, dict):
@@ -2743,6 +2755,9 @@ class AutomationManager:
             language = str(payload.get("language") or self.client.conversation_language)
 
             if operation == "delete":
+                shell_entity_id = str(
+                    self.client.resolve_automation_entity_id(automation_id=target_id, alias=target_alias) or ""
+                )
                 try:
                     self.client.delete_automation(target_id)
                     self.client.reload_automations()
@@ -2761,12 +2776,27 @@ class AutomationManager:
                             debug={"backup": backup_used},
                         ) from exc
                     raise AutomationError(f"delete failed: {exc}") from exc
+
+                cleanup_warning = ""
+                if shell_entity_id:
+                    try:
+                        self.client.remove_entity_registry_entity(shell_entity_id)
+                    except Exception as exc:
+                        cleanup_warning = f"; 空壳实体清理失败: {exc}"
+                        logger.warning(
+                            "automation delete post-reload shell cleanup failed for %s (automation_id=%s): %s",
+                            shell_entity_id,
+                            target_id,
+                            exc,
+                        )
                 return {
                     "ok": True,
                     "operation": "delete",
                     "automation_id": target_id,
                     "name": target_alias,
-                    "message": f"已删除自动化: {target_alias}",
+                    "shell_entity_id": shell_entity_id,
+                    "shell_entity_cleanup_ok": bool(shell_entity_id) and not cleanup_warning,
+                    "message": f"已删除自动化: {target_alias}{cleanup_warning}",
                 }
 
             if operation != "update":
@@ -3025,6 +3055,9 @@ class AutomationManager:
             language = str(payload.get("language") or self.client.conversation_language)
 
             if operation == "delete":
+                shell_entity_id = str(
+                    self.client.resolve_script_entity_id(script_id=target_id, alias=target_alias) or ""
+                )
                 try:
                     self.client.delete_script(target_id)
                     self.client.reload_scripts()
@@ -3043,12 +3076,27 @@ class AutomationManager:
                             debug={"backup": backup_used},
                         ) from exc
                     raise AutomationError(f"delete script failed: {exc}") from exc
+
+                cleanup_warning = ""
+                if shell_entity_id:
+                    try:
+                        self.client.remove_entity_registry_entity(shell_entity_id)
+                    except Exception as exc:
+                        cleanup_warning = f"; 空壳实体清理失败: {exc}"
+                        logger.warning(
+                            "script delete post-reload shell cleanup failed for %s (script_id=%s): %s",
+                            shell_entity_id,
+                            target_id,
+                            exc,
+                        )
                 return {
                     "ok": True,
                     "operation": "delete_script",
                     "script_id": target_id,
                     "name": target_alias,
-                    "message": f"已删除脚本: {target_alias}",
+                    "shell_entity_id": shell_entity_id,
+                    "shell_entity_cleanup_ok": bool(shell_entity_id) and not cleanup_warning,
+                    "message": f"已删除脚本: {target_alias}{cleanup_warning}",
                 }
 
             if operation != "update":
